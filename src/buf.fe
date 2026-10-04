@@ -1,0 +1,250 @@
+use std::native::ByteBuffer
+
+/// A byte range inside a buffer.
+pub struct Span {
+    pub start: u64,
+    pub len: u64,
+}
+
+impl Copy for Span {}
+
+impl Span {
+    pub fn end(self) -> u64 {
+        self.start + self.len
+    }
+}
+
+/// Append one byte. Running out of host memory is fatal.
+pub fn push(_ buf: mut ByteBuffer, _ byte: u8) {
+    let len = buf.len()
+    core::assert(buf.try_resize(len + 1))
+    buf.set_byte(index: len, value: byte)
+}
+
+/// String literals. Unlike `core::AsBytes`, `String::as_bytes` also works on
+/// runtime values (see fe branch `fix/runtime-as-bytes`).
+pub trait Literal {
+    const SIZE: usize
+    fn bytes(self) -> [u8; Self::SIZE]
+}
+
+impl<const LEN: usize> Literal for String<LEN> {
+    const SIZE: usize = LEN
+    fn bytes(self) -> [u8; Self::SIZE] {
+        self.as_bytes()
+    }
+}
+
+pub fn push_lit<T: Literal>(_ buf: mut ByteBuffer, _ text: T) {
+    let bytes = text.bytes()
+    let mut i: usize = 0
+    while i < T::SIZE {
+        push(mut buf, bytes[i])
+        i += 1
+    }
+}
+
+/// Append `span` of `source` to `buf`.
+pub fn push_span(_ buf: mut ByteBuffer, _ source: ByteBuffer, _ span: Span) {
+    let mut i: u64 = 0
+    while i < span.len {
+        push(mut buf, source.byte_at(span.start + i))
+        i += 1
+    }
+}
+
+/// Append `span` of `buf` to its own end.
+pub fn push_own_span(_ buf: mut ByteBuffer, _ span: Span) {
+    let mut i: u64 = 0
+    while i < span.len {
+        let byte = buf.byte_at(span.start + i)
+        push(mut buf, byte)
+        i += 1
+    }
+}
+
+pub fn span_eq_lit<T: Literal>(_ buf: ByteBuffer, _ span: Span, _ text: T) -> bool {
+    let bytes = text.bytes()
+    if span.len as usize != T::SIZE {
+        return false
+    }
+    let mut i: u64 = 0
+    while i < span.len {
+        if buf.byte_at(span.start + i) != bytes[i as usize] {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+/// Like `span_eq_lit`, but compares ASCII letters case-insensitively.
+pub fn span_eq_lit_lower<T: Literal>(_ buf: ByteBuffer, _ span: Span, _ text: T) -> bool {
+    let bytes = text.bytes()
+    if span.len as usize != T::SIZE {
+        return false
+    }
+    let mut i: u64 = 0
+    while i < span.len {
+        if to_lower(buf.byte_at(span.start + i)) != bytes[i as usize] {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+pub fn spans_eq(_ buf: ByteBuffer, _ a: Span, _ b: Span) -> bool {
+    compare_spans(buf, a, b) == 0
+}
+
+/// Byte-wise ordering, which matches code point ordering for UTF-8 text.
+pub fn compare_spans(_ buf: ByteBuffer, _ a: Span, _ b: Span) -> i32 {
+    compare_between(buf, a, buf, b)
+}
+
+/// `compare_spans` for spans of different buffers.
+pub fn compare_between(_ a_buf: ByteBuffer, _ a: Span, _ b_buf: ByteBuffer, _ b: Span) -> i32 {
+    let mut i: u64 = 0
+    while i < a.len && i < b.len {
+        let x = a_buf.byte_at(a.start + i)
+        let y = b_buf.byte_at(b.start + i)
+        if x < y {
+            return -1
+        }
+        if x > y {
+            return 1
+        }
+        i += 1
+    }
+    compare_u64(a.len, b.len)
+}
+
+pub fn compare_u64(_ a: u64, _ b: u64) -> i32 {
+    if a < b {
+        -1
+    } else if a > b {
+        1
+    } else {
+        0
+    }
+}
+
+/// Offset of the first occurrence of `needle` (of `needle_buf`) in
+/// `haystack` (of `buf`), or `haystack.len`.
+pub fn find_in(_ buf: ByteBuffer, _ haystack: Span, _ needle_buf: ByteBuffer, _ needle: Span) -> u64 {
+    if needle.len > haystack.len {
+        return haystack.len
+    }
+    let mut offset: u64 = 0
+    while offset + needle.len <= haystack.len {
+        let candidate = Span { start: haystack.start + offset, len: needle.len }
+        if compare_between(buf, candidate, needle_buf, needle) == 0 {
+            return offset
+        }
+        offset += 1
+    }
+    haystack.len
+}
+
+pub fn to_lower(_ byte: u8) -> u8 {
+    if byte >= 65 && byte <= 90 { byte + 32 } else { byte }
+}
+
+pub fn is_digit(_ byte: u8) -> bool {
+    byte >= 48 && byte <= 57
+}
+
+/// The characters that Python's `str.strip()` removes, restricted to ASCII.
+pub fn is_space(_ byte: u8) -> bool {
+    byte == 32 || (byte >= 9 && byte <= 13) || (byte >= 28 && byte <= 31)
+}
+
+pub fn all_digits(_ buf: ByteBuffer, _ span: Span) -> bool {
+    if span.len == 0 {
+        return false
+    }
+    let mut i: u64 = 0
+    while i < span.len {
+        if !is_digit(buf.byte_at(span.start + i)) {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+pub fn strip(_ buf: ByteBuffer, _ span: Span) -> Span {
+    rstrip(buf, lstrip(buf, span))
+}
+
+pub fn lstrip(_ buf: ByteBuffer, _ span: Span) -> Span {
+    let mut start = span.start
+    while start < span.end() && is_space(buf.byte_at(start)) {
+        start += 1
+    }
+    Span { start, len: span.end() - start }
+}
+
+pub fn rstrip(_ buf: ByteBuffer, _ span: Span) -> Span {
+    let mut end = span.end()
+    while end > span.start && is_space(buf.byte_at(end - 1)) {
+        end -= 1
+    }
+    Span { start: span.start, len: end - span.start }
+}
+
+/// A growable table of `u64` cells with a fixed number of columns.
+pub struct Table {
+    cells: ByteBuffer,
+    columns: u64,
+}
+
+impl Table {
+    pub fn new(_ columns: u64) -> Self {
+        Self { cells: ByteBuffer::new(), columns }
+    }
+
+    pub fn rows(self) -> u64 {
+        self.cells.len() / (self.columns * 8)
+    }
+
+    /// Append a zeroed row and return its index.
+    pub fn add_row(mut self) -> u64 {
+        let row = self.rows()
+        core::assert(self.cells.try_resize((row + 1) * self.columns * 8))
+        row
+    }
+
+    pub fn get(self, _ row: u64, _ column: u64) -> u64 {
+        core::assert(column < self.columns)
+        let base = (row * self.columns + column) * 8
+        let mut value: u64 = 0
+        let mut i: u64 = 8
+        while i > 0 {
+            i -= 1
+            value = (value << 8) | self.cells.byte_at(base + i) as u64
+        }
+        value
+    }
+
+    pub fn set(mut self, _ row: u64, _ column: u64, _ value: u64) {
+        core::assert(column < self.columns)
+        let base = (row * self.columns + column) * 8
+        let mut i: u64 = 0
+        while i < 8 {
+            self.cells.set_byte(index: base + i, value: ((value >> (i * 8)) & 0xff).downcast_truncate())
+            i += 1
+        }
+    }
+
+    /// Append a single-column row holding `value`.
+    pub fn push(mut self, _ value: u64) {
+        let row = self.add_row()
+        self.set(row, 0, value)
+    }
+
+    pub fn release(own self) {
+        self.cells.release()
+    }
+}

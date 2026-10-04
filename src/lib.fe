@@ -1,0 +1,131 @@
+//! crier: assembles release notes from news fragments, like towncrier.
+//!
+//! The executable only talks through stdin and stdout; the `crier` shell
+//! script feeds it the fragment directory and writes the results back.
+//!
+//!     crier-bin draft <version> <date>   print the release notes
+//!     crier-bin build <version> <date>   print the changelog with the notes inserted
+//!     crier-bin list                     print the names of the consumed fragments
+//!     crier-bin check                    validate the fragment directory
+//!     crier-bin check-empty              require an empty fragment directory
+//!
+//! Errors are printed to stdout as well; a nonzero exit status says that the
+//! output is an error message.
+
+use ingot::buf::{Span, Table, push_lit, push_span, span_eq_lit}
+use ingot::check::check
+use ingot::news::{News, Status}
+use std::io::{Read, Write, host, write_char}
+use std::native::{Args, ByteBuffer}
+
+pub fn main(argc: i32, argv: **u8) -> i32 {
+    let args = Args::new(argc, argv)
+    let mut news = News::new()
+    let mut out = ByteBuffer::new()
+    // Copy the arguments so that only `news` is borrowed from here on.
+    let mut words = Table::new(2)
+    let mut i: usize = 1
+    while i < args.len() {
+        let span = news.intern_arg(args.get(i))
+        words.push(span.start)
+        words.set(words.rows() - 1, 1, span.len)
+        i += 1
+    }
+    let code = with (Read = host(), Write = host()) {
+        let code = run(words, mut news, mut out)
+        let mut j: u64 = 0
+        while j < out.len() {
+            write_char(out.byte_at(j) as i32)
+            j += 1
+        }
+        code
+    }
+    words.release()
+    out.release()
+    news.release()
+    code
+}
+
+/// `words` holds the spans (start, len) of the command line arguments in `news.data`.
+fn run(_ words: Table, _ news: mut News, _ out: mut ByteBuffer) -> i32 uses (input: mut Read) {
+    let count = words.rows()
+    if count == 0 {
+        return usage(mut out)
+    }
+    let command = word(words, 0)
+    let is_draft = span_eq_lit(news.data, command, "draft")
+    let is_build = span_eq_lit(news.data, command, "build")
+    let is_list = span_eq_lit(news.data, command, "list")
+    let is_check = span_eq_lit(news.data, command, "check")
+    let is_check_empty = span_eq_lit(news.data, command, "check-empty")
+    let wants_version = is_draft || is_build
+    if (wants_version && count != 3) || (!wants_version && count != 1) {
+        return usage(mut out)
+    }
+    if !(wants_version || is_list || is_check || is_check_empty) {
+        return usage(mut out)
+    }
+
+    let mut status = news.read()
+    if is_check || is_check_empty {
+        if !status.is_ok() {
+            return fail(mut out, news, status)
+        }
+        return if check(news, mut out, expect_empty: is_check_empty) { 0 } else { 1 }
+    }
+    if status.is_ok() {
+        status = news.collect()
+    }
+    if status.is_ok() {
+        if is_draft {
+            news.render(mut out, version: word(words, 1), date: word(words, 2))
+            push_lit(mut out, "\n")
+        } else if is_build {
+            status = news.render_changelog(mut out, version: word(words, 1), date: word(words, 2))
+        } else {
+            let mut f: u64 = 0
+            while f < news.fragment_count() {
+                if news.is_news(f) {
+                    push_span(mut out, news.data, news.name(f))
+                    push_lit(mut out, "\n")
+                }
+                f += 1
+            }
+        }
+    }
+    if !status.is_ok() {
+        out.clear()
+        return fail(mut out, news, status)
+    }
+    0
+}
+
+fn word(_ words: Table, _ index: u64) -> Span {
+    Span { start: words.get(index, 0), len: words.get(index, 1) }
+}
+
+fn fail(_ out: mut ByteBuffer, _ news: News, _ status: Status) -> i32 {
+    match status {
+        Status::MalformedInput => push_lit(mut out, "malformed input stream\n")
+        Status::DuplicateFragment => {
+            push_lit(mut out, "multiple fragments for the ")
+            push_lit(mut out, "same issue, type and counter: ")
+            push_span(mut out, news.data, news.name(news.duplicate))
+            push_lit(mut out, "\n")
+        }
+        Status::AlreadyReleased => {
+            push_lit(mut out, "It seems you've already ")
+            push_lit(mut out, "produced newsfiles for ")
+            push_lit(mut out, "this version?\n")
+        }
+        Status::Ok => {}
+    }
+    1
+}
+
+fn usage(_ out: mut ByteBuffer) -> i32 {
+    push_lit(mut out, "usage: crier-bin (draft|build) ")
+    push_lit(mut out, "<version> <date> | list | ")
+    push_lit(mut out, "check | check-empty\n")
+    2
+}

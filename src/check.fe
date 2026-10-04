@@ -1,0 +1,74 @@
+//! Validation of the fragment directory, as `newsfragments/validate_files.py` did.
+//! towncrier silently ignores files that do not match the expected pattern, so
+//! CI uses this to reject them.
+
+use ingot::buf::{Span, all_digits, push_lit, push_span, span_eq_lit}
+use ingot::config::{NO_TYPE, type_index}
+use ingot::news::News
+use std::native::ByteBuffer
+
+/// Check every file of the fragment directory. With `expect_empty`, any file
+/// that is not part of the tooling is an error (used right before a release).
+/// Describes the first problem in `out` and returns false, or returns true.
+pub fn check(_ news: News, _ out: mut ByteBuffer, expect_empty: bool) -> bool {
+    let mut f: u64 = 0
+    while f < news.fragment_count() {
+        let name = news.name(f)
+        if !is_tooling(news.data, name) {
+            if expect_empty || !is_valid_name(news.data, name) {
+                push_lit(mut out, "Unexpected file: ")
+                push_span(mut out, news.data, name)
+                push_lit(mut out, "\n")
+                return false
+            }
+            let content = news.content(f)
+            if content.len == 0 || news.data.byte_at(content.end() - 1) != 10 {
+                push_lit(mut out, "Fragment files need to end ")
+                push_lit(mut out, "with new line but ")
+                push_span(mut out, news.data, name)
+                push_lit(mut out, " does not.\n")
+                return false
+            }
+        }
+        f += 1
+    }
+    true
+}
+
+fn is_tooling(_ buf: ByteBuffer, _ name: Span) -> bool {
+    span_eq_lit(buf, name, "validate_files.py") || span_eq_lit(buf, name, "README.md")
+}
+
+/// `<anything>.<type>[.<counter>].md`, with the suffixes counted like
+/// Python's `Path.suffixes`.
+fn is_valid_name(_ buf: ByteBuffer, _ name: Span) -> bool {
+    if name.len == 0 || buf.byte_at(name.end() - 1) == 46 {
+        return false
+    }
+    // Leading dots belong to the stem.
+    let mut start = name.start
+    while start < name.end() && buf.byte_at(start) == 46 {
+        start += 1
+    }
+    // The last three suffixes, innermost last; missing ones have `len == NO_TYPE`.
+    let mut suffixes: [Span; 3] = [Span { start: 0, len: NO_TYPE }; 3]
+    let mut count: u64 = 0
+    let mut end = name.end()
+    let mut pos = name.end()
+    while pos > start {
+        pos -= 1
+        if buf.byte_at(pos) == 46 {
+            if count < 3 {
+                suffixes[count as usize] = Span { start: pos + 1, len: end - pos - 1 }
+            }
+            count += 1
+            end = pos
+        }
+    }
+    if count < 2 || !span_eq_lit(buf, suffixes[0], "md") {
+        return false
+    }
+    let has_counter = count >= 3 && all_digits(buf, suffixes[1])
+    let kind = if has_counter { suffixes[2] } else { suffixes[1] }
+    type_index(buf, kind) != NO_TYPE
+}

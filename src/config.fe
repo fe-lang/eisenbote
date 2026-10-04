@@ -1,0 +1,86 @@
+//! The release notes configuration. It mirrors the `[tool.towncrier]` table
+//! that the Fe repository used in `pyproject.toml`.
+
+use ingot::buf::{Span, push_lit, push_span, span_eq_lit}
+use std::native::ByteBuffer
+
+/// Number of fragment types. Types are identified by their index, which is
+/// also the order of their sections in the release notes.
+pub const TYPE_COUNT: u64 = 7
+
+/// Marks a fragment name whose type is not configured.
+pub const NO_TYPE: u64 = 0xffffffffffffffff
+
+/// Fragments whose issue starts with this prefix have no issue.
+pub const ORPHAN_PREFIX: u8 = 43 // '+'
+
+/// Index of the fragment type named by `span`, or `NO_TYPE`.
+pub fn type_index(_ buf: ByteBuffer, _ span: Span) -> u64 {
+    if span_eq_lit(buf, span, "feature") {
+        0
+    } else if span_eq_lit(buf, span, "bugfix") {
+        1
+    } else if span_eq_lit(buf, span, "performance") {
+        2
+    } else if span_eq_lit(buf, span, "doc") {
+        3
+    } else if span_eq_lit(buf, span, "removal") {
+        4
+    } else if span_eq_lit(buf, span, "internal") {
+        5
+    } else if span_eq_lit(buf, span, "misc") {
+        6
+    } else {
+        NO_TYPE
+    }
+}
+
+/// Append the section title of fragment type `index`.
+pub fn push_type_name(_ out: mut ByteBuffer, _ index: u64) {
+    if index == 0 {
+        push_lit(mut out, "Features")
+    } else if index == 1 {
+        push_lit(mut out, "Bugfixes")
+    } else if index == 2 {
+        push_lit(mut out, "Performance improvements")
+    } else if index == 3 {
+        push_lit(mut out, "Improved Documentation")
+    } else if index == 4 {
+        push_lit(mut out, "Deprecations and Removals")
+    } else if index == 5 {
+        push_lit(mut out, "Internal Changes - ")
+        push_lit(mut out, "for Fe Contributors")
+    } else {
+        push_lit(mut out, "Miscellaneous changes")
+    }
+}
+
+/// Whether fragments of this type contribute their text, or only their issue.
+pub fn shows_content(_ index: u64) -> bool {
+    index != 6
+}
+
+/// Append the link to `issue` (a span of `source`).
+pub fn push_issue_link(_ out: mut ByteBuffer, _ source: ByteBuffer, _ issue: Span) {
+    push_lit(mut out, "[#")
+    push_span(mut out, source, issue)
+    push_lit(mut out, "](https://github.com/")
+    push_lit(mut out, "argotorg/fe/issues/")
+    push_span(mut out, source, issue)
+    push_lit(mut out, ")")
+}
+
+/// Append the release title.
+pub fn push_title(_ out: mut ByteBuffer, _ source: ByteBuffer, version: Span, date: Span) {
+    push_lit(mut out, "## ")
+    push_span(mut out, source, version)
+    push_lit(mut out, " (")
+    push_span(mut out, source, date)
+    push_lit(mut out, ")")
+}
+
+/// Append the marker behind which new releases are inserted into the changelog.
+pub fn push_start_string(_ out: mut ByteBuffer) {
+    push_lit(mut out, "[//]: # (towncrier ")
+    push_lit(mut out, "release notes start)")
+}

@@ -1,0 +1,146 @@
+#!/bin/sh
+# crier: assemble release notes from news fragments, like towncrier.
+#
+# All logic lives in the native Fe executable `crier-bin` (built from src/).
+# Fe programs can't open files yet, so this script feeds it the fragment
+# directory (and the changelog) on stdin and writes its output back.
+set -eu
+
+usage() {
+    cat >&2 <<'EOF'
+usage: crier draft --version <version> [--date <date>]
+       crier build --version <version> [--date <date>] [--yes | --keep]
+       crier check [--empty]
+
+Options:
+  --dir <dir>     fragment directory (default: newsfragments)
+  --file <file>   changelog (default: CHANGELOG.md)
+  --date <date>   release date (default: today, YYYY-MM-DD)
+  --yes           remove the consumed fragments without asking
+  --keep          keep the consumed fragments
+
+draft   print the release notes for the pending fragments
+build   insert the release notes into the changelog, stage it and remove
+        the consumed fragments with git
+check   reject files in the fragment directory that are not valid fragments;
+        with --empty, reject any fragment (used before tagging a release)
+EOF
+    exit 2
+}
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+bin=${CRIER_BIN:-$here/../out/crier}
+if [ ! -x "$bin" ]; then
+    echo "crier: executable not found at $bin (run make, or set CRIER_BIN)" >&2
+    exit 2
+fi
+
+[ $# -ge 1 ] || usage
+command=$1
+shift
+dir=newsfragments
+file=CHANGELOG.md
+version=
+date=
+answer=ask
+empty=no
+while [ $# -gt 0 ]; do
+    case $1 in
+        --dir) [ $# -ge 2 ] || usage; dir=$2; shift 2 ;;
+        --file) [ $# -ge 2 ] || usage; file=$2; shift 2 ;;
+        --version) [ $# -ge 2 ] || usage; version=$2; shift 2 ;;
+        --date) [ $# -ge 2 ] || usage; date=$2; shift 2 ;;
+        --yes) answer=yes; shift ;;
+        --keep) answer=keep; shift ;;
+        --empty) empty=yes; shift ;;
+        *) usage ;;
+    esac
+done
+[ -n "$date" ] || date=$(date +%Y-%m-%d)
+
+# Write one record per regular file of the fragment directory, in byte order
+# of their names so that the output doesn't depend on the file system.
+fragments() {
+    [ -d "$dir" ] || return 0
+    LC_ALL=C ls -A -- "$dir" | while IFS= read -r name; do
+        path=$dir/$name
+        [ -f "$path" ] || continue
+        printf 'F %s %s\n' "$(($(wc -c < "$path")))" "$name"
+        cat -- "$path"
+    done
+}
+
+changelog() {
+    [ -f "$file" ] || return 0
+    printf 'C %s\n' "$(($(wc -c < "$file")))"
+    cat -- "$file"
+}
+
+# Run crier-bin with the given input producer; on failure its output is the
+# error message.
+run() {
+    producer=$1
+    shift
+    out=$(mktemp)
+    if $producer | "$bin" "$@" > "$out"; then
+        cat "$out"
+        rm -f "$out"
+    else
+        status=$?
+        sed 's/^/crier: /' "$out" >&2
+        rm -f "$out"
+        exit "$status"
+    fi
+}
+
+with_changelog() {
+    fragments
+    changelog
+}
+
+case $command in
+    draft)
+        [ -n "$version" ] || usage
+        run fragments draft "$version" "$date"
+        ;;
+    build)
+        [ -n "$version" ] || usage
+        consumed=$(run fragments list)
+        notes=$(mktemp)
+        # Keep the trailing newlines that $(...) would strip.
+        run with_changelog build "$version" "$date" > "$notes"
+        mv -- "$notes" "$file"
+        git add -- "$file"
+        if [ -z "$consumed" ]; then
+            echo "No news fragments to remove. Skipping!"
+            exit 0
+        fi
+        if [ "$answer" = ask ]; then
+            echo "I want to remove the following files:"
+            printf '%s\n' "$consumed" | sed "s|^|$dir/|"
+            printf 'Is it okay if I remove those files? [Y/n]: '
+            read -r reply || reply=n
+            case $reply in ''|y|Y|yes) answer=yes ;; *) answer=keep ;; esac
+        fi
+        if [ "$answer" = yes ]; then
+            printf '%s\n' "$consumed" | while IFS= read -r name; do
+                path=$dir/$name
+                if git ls-files --error-unmatch -- "$path" > /dev/null 2>&1; then
+                    git rm --quiet --force -- "$path"
+                else
+                    rm -f -- "$path"
+                fi
+            done
+        fi
+        ;;
+    check)
+        if [ "$empty" = yes ]; then
+            run fragments check-empty
+        else
+            run fragments check
+        fi
+        ;;
+    *)
+        usage
+        ;;
+esac

@@ -1,0 +1,655 @@
+//! Collects news fragments and renders them like towncrier's markdown template.
+
+use ingot::buf::{
+    Span, Table, all_digits, compare_spans, compare_u64, find_in, is_digit, lstrip, push,
+    push_lit, push_own_span, push_span, rstrip, span_eq_lit_lower, spans_eq, strip,
+}
+use ingot::config::{
+    NO_TYPE, ORPHAN_PREFIX, TYPE_COUNT, push_issue_link, push_start_string, push_title,
+    push_type_name, shows_content, type_index,
+}
+use std::io::{Read, read_char}
+use std::native::ByteBuffer
+
+// Fragment table columns.
+const NAME_START: u64 = 0
+const NAME_LEN: u64 = 1
+const CONTENT_START: u64 = 2
+const CONTENT_LEN: u64 = 3
+const TYPE: u64 = 4
+const ISSUE_START: u64 = 5
+const ISSUE_LEN: u64 = 6
+const COUNTER: u64 = 7
+const TEXT_START: u64 = 8
+const TEXT_LEN: u64 = 9
+const ENTRY: u64 = 10
+const FRAGMENT_COLUMNS: u64 = 11
+
+// Entry table columns. An entry is one bullet: a distinct text of one type,
+// together with the issues of all fragments that share it.
+const ENTRY_TYPE: u64 = 0
+const ENTRY_TEXT_START: u64 = 1
+const ENTRY_TEXT_LEN: u64 = 2
+const ENTRY_COLUMNS: u64 = 3
+
+pub enum Status {
+    Ok,
+    MalformedInput,
+    DuplicateFragment,
+    AlreadyReleased,
+}
+
+impl Status {
+    pub fn is_ok(self) -> bool {
+        match self {
+            Status::Ok => true
+            _ => false
+        }
+    }
+}
+
+/// All input files plus everything derived from them.
+///
+/// Input arrives on stdin as a sequence of records. Each record is a header
+/// line followed by exactly `<len>` bytes of file content:
+///
+///     F <len> <file name>\n   a news fragment (or any other file in the fragment directory)
+///     C <len>\n               the current changelog
+///
+/// Line endings in contents are normalized to `\n`.
+pub struct News {
+    /// File names and contents, followed by derived text.
+    pub data: ByteBuffer,
+    pub fragments: Table,
+    entries: Table,
+    pub has_changelog: bool,
+    changelog: Span,
+    /// Index of the first fragment that is named like an existing one.
+    pub duplicate: u64,
+}
+
+impl News {
+    pub fn new() -> Self {
+        Self {
+            data: ByteBuffer::new(),
+            fragments: Table::new(FRAGMENT_COLUMNS),
+            entries: Table::new(ENTRY_COLUMNS),
+            has_changelog: false,
+            changelog: Span { start: 0, len: 0 },
+            duplicate: 0,
+        }
+    }
+
+    pub fn release(own self) {
+        self.data.release()
+        self.fragments.release()
+        self.entries.release()
+    }
+
+    pub fn fragment_count(self) -> u64 {
+        self.fragments.rows()
+    }
+
+    pub fn name(self, _ fragment: u64) -> Span {
+        Span { start: self.fragments.get(fragment, NAME_START), len: self.fragments.get(fragment, NAME_LEN) }
+    }
+
+    pub fn content(self, _ fragment: u64) -> Span {
+        Span { start: self.fragments.get(fragment, CONTENT_START), len: self.fragments.get(fragment, CONTENT_LEN) }
+    }
+
+    fn issue(self, _ fragment: u64) -> Span {
+        Span { start: self.fragments.get(fragment, ISSUE_START), len: self.fragments.get(fragment, ISSUE_LEN) }
+    }
+
+    fn text(self, _ fragment: u64) -> Span {
+        Span { start: self.fragments.get(fragment, TEXT_START), len: self.fragments.get(fragment, TEXT_LEN) }
+    }
+
+    fn entry_text(self, _ entry: u64) -> Span {
+        Span { start: self.entries.get(entry, ENTRY_TEXT_START), len: self.entries.get(entry, ENTRY_TEXT_LEN) }
+    }
+
+    /// Whether the fragment is a news fragment of a configured type.
+    pub fn is_news(self, _ fragment: u64) -> bool {
+        self.fragments.get(fragment, TYPE) != NO_TYPE
+    }
+
+    /// Copy `text` into the data buffer and return its span.
+    pub fn intern_arg(mut self, _ arg: std::native::Arg) -> Span {
+        let start = self.data.len()
+        let mut i: usize = 0
+        while i < arg.len() {
+            push(mut self.data, arg.byte_at(i))
+            i += 1
+        }
+        Span { start, len: self.data.len() - start }
+    }
+
+    /// Read all records from stdin.
+    pub fn read(mut self) -> Status uses (input: mut Read) {
+        let mut kind = read_char()
+        while kind >= 0 {
+            if read_char() != 32 {
+                return Status::MalformedInput
+            }
+            let mut len: u64 = 0
+            let mut c = read_char()
+            let mut digits: u64 = 0
+            while c >= 48 && c <= 57 && digits < 19 {
+                len = len * 10 + (c - 48).downcast_unchecked()
+                digits += 1
+                c = read_char()
+            }
+            if digits == 0 {
+                return Status::MalformedInput
+            }
+            if kind == 70 {
+                // 'F'
+                if c != 32 {
+                    return Status::MalformedInput
+                }
+                let name_start = self.data.len()
+                c = read_char()
+                while c >= 0 && c != 10 {
+                    push(mut self.data, c.downcast_unchecked())
+                    c = read_char()
+                }
+                if c != 10 {
+                    return Status::MalformedInput
+                }
+                let name_len = self.data.len() - name_start
+                let content = self.read_content(len)
+                if content.len == NO_TYPE {
+                    return Status::MalformedInput
+                }
+                let row = self.fragments.add_row()
+                self.fragments.set(row, NAME_START, name_start)
+                self.fragments.set(row, NAME_LEN, name_len)
+                self.fragments.set(row, CONTENT_START, content.start)
+                self.fragments.set(row, CONTENT_LEN, content.len)
+                self.fragments.set(row, TYPE, NO_TYPE)
+            } else if kind == 67 {
+                // 'C'
+                if c != 10 || self.has_changelog {
+                    return Status::MalformedInput
+                }
+                let content = self.read_content(len)
+                if content.len == NO_TYPE {
+                    return Status::MalformedInput
+                }
+                self.has_changelog = true
+                self.changelog = content
+            } else {
+                return Status::MalformedInput
+            }
+            kind = read_char()
+        }
+        Status::Ok
+    }
+
+    /// Read `len` bytes, normalizing `\r\n` and `\r` to `\n`. Returns a span
+    /// of length `NO_TYPE` if the input ends early.
+    fn read_content(mut self, _ len: u64) -> Span uses (input: mut Read) {
+        let start = self.data.len()
+        let mut after_cr = false
+        let mut i: u64 = 0
+        while i < len {
+            let c = read_char()
+            if c < 0 {
+                return Span { start, len: NO_TYPE }
+            }
+            if c == 13 {
+                push(mut self.data, 10)
+                after_cr = true
+            } else {
+                if c != 10 || !after_cr {
+                    push(mut self.data, c.downcast_unchecked())
+                }
+                after_cr = false
+            }
+            i += 1
+        }
+        Span { start, len: self.data.len() - start }
+    }
+
+    /// Determine type, issue and counter of every fragment, derive their bullet
+    /// text and group them into entries.
+    pub fn collect(mut self) -> Status {
+        let mut orphans: [u64; 7] = [0; 7]
+        let count = self.fragments.rows()
+        let mut f: u64 = 0
+        while f < count {
+            self.parse_name(f)
+            let kind = self.fragments.get(f, TYPE)
+            if kind != NO_TYPE {
+                let issue = self.issue(f)
+                if issue.len > 0 && self.data.byte_at(issue.start) == ORPHAN_PREFIX {
+                    self.fragments.set(f, ISSUE_LEN, 0)
+                    self.fragments.set(f, COUNTER, orphans[kind as usize])
+                    orphans[kind as usize] += 1
+                }
+                if self.find_duplicate(f) {
+                    self.duplicate = f
+                    return Status::DuplicateFragment
+                }
+                self.derive_text(f)
+                self.assign_entry(f)
+            }
+            f += 1
+        }
+        Status::Ok
+    }
+
+    /// Parse `<issue>.<type>[.<counter>][.<anything>]` like towncrier: the type
+    /// is the last dot-separated part (after the first) that names a configured
+    /// type, everything before it is the issue.
+    fn parse_name(mut self, _ f: u64) {
+        let name = self.name(f)
+        if is_ignored(self.data, name) {
+            return
+        }
+        // Walk the parts from the back. `end` is the end of the current part.
+        let mut end = name.end()
+        let mut next_part = Span { start: name.end(), len: 0 }
+        let mut has_next = false
+        let mut pos = name.end()
+        while pos > name.start {
+            pos -= 1
+            if self.data.byte_at(pos) == 46 {
+                let part = Span { start: pos + 1, len: end - pos - 1 }
+                let kind = type_index(self.data, part)
+                if kind != NO_TYPE {
+                    let issue = normalize_issue(self.data, strip(self.data, Span { start: name.start, len: pos - name.start }))
+                    let mut counter: u64 = 0
+                    if has_next && all_digits(self.data, next_part) {
+                        counter = parse_counter(self.data, next_part)
+                    }
+                    self.fragments.set(f, TYPE, kind)
+                    self.fragments.set(f, ISSUE_START, issue.start)
+                    self.fragments.set(f, ISSUE_LEN, issue.len)
+                    self.fragments.set(f, COUNTER, counter)
+                    return
+                }
+                next_part = part
+                has_next = true
+                end = pos
+            }
+        }
+    }
+
+    fn find_duplicate(self, _ f: u64) -> bool {
+        let kind = self.fragments.get(f, TYPE)
+        let counter = self.fragments.get(f, COUNTER)
+        let mut g: u64 = 0
+        while g < f {
+            if self.fragments.get(g, TYPE) == kind
+                && self.fragments.get(g, COUNTER) == counter
+                && spans_eq(self.data, self.issue(g), self.issue(f))
+            {
+                return true
+            }
+            g += 1
+        }
+        false
+    }
+
+    /// The bullet text: the stripped content with continuation lines indented
+    /// under the bullet. Types that do not show content use an empty text for
+    /// fragments with an issue.
+    fn derive_text(mut self, _ f: u64) {
+        let start = self.data.len()
+        let kind = self.fragments.get(f, TYPE)
+        if shows_content(kind) || self.issue(f).len == 0 {
+            let content = strip(self.data, self.content(f))
+            let mut line_start = content.start
+            while line_start < content.end() {
+                let mut line_end = line_start
+                while line_end < content.end() && self.data.byte_at(line_end) != 10 {
+                    line_end += 1
+                }
+                if line_end < content.end() {
+                    line_end += 1
+                }
+                let line = Span { start: line_start, len: line_end - line_start }
+                if line_start != content.start && strip(self.data, line).len > 0 {
+                    push_lit(mut self.data, "  ")
+                }
+                push_own_span(mut self.data, line)
+                line_start = line_end
+            }
+        }
+        self.fragments.set(f, TEXT_START, start)
+        self.fragments.set(f, TEXT_LEN, self.data.len() - start)
+    }
+
+    fn assign_entry(mut self, _ f: u64) {
+        let kind = self.fragments.get(f, TYPE)
+        let text = self.text(f)
+        let mut e: u64 = 0
+        while e < self.entries.rows() {
+            if self.entries.get(e, ENTRY_TYPE) == kind && spans_eq(self.data, self.entry_text(e), text) {
+                self.fragments.set(f, ENTRY, e)
+                return
+            }
+            e += 1
+        }
+        e = self.entries.add_row()
+        self.entries.set(e, ENTRY_TYPE, kind)
+        self.entries.set(e, ENTRY_TEXT_START, text.start)
+        self.entries.set(e, ENTRY_TEXT_LEN, text.len)
+        self.fragments.set(f, ENTRY, e)
+    }
+
+    /// Fragments of `entry` that have an issue, ordered by issue.
+    fn entry_issues(self, _ entry: u64) -> Table {
+        let mut issues = Table::new(1)
+        let mut f: u64 = 0
+        while f < self.fragments.rows() {
+            if self.is_news(f) && self.fragments.get(f, ENTRY) == entry && self.issue(f).len > 0 {
+                // Insertion sort by (issue key, issue).
+                issues.push(f)
+                let mut i = issues.rows() - 1
+                while i > 0 && self.compare_issues(issues.get(i - 1, 0), f, true) > 0 {
+                    issues.set(i, 0, issues.get(i - 1, 0))
+                    i -= 1
+                }
+                issues.set(i, 0, f)
+            }
+            f += 1
+        }
+        issues
+    }
+
+    /// Compare the issues of two fragments like towncrier's `issue_key`.
+    /// With `exact`, equal keys are ordered by the issue text itself.
+    fn compare_issues(self, _ a: u64, _ b: u64, _ exact: bool) -> i32 {
+        let x = self.issue(a)
+        let y = self.issue(b)
+        let x_digits = first_digit_run(self.data, x)
+        let y_digits = first_digit_run(self.data, y)
+        // Issues without digits sort first, then mixed ones, digit-only ones last.
+        let x_class = issue_class(x, x_digits)
+        let y_class = issue_class(y, y_digits)
+        let mut order = compare_u64(x_class, y_class)
+        if order == 0 {
+            order = compare_without(self.data, x, x_digits, y, y_digits)
+        }
+        if order == 0 {
+            order = compare_numbers(self.data, x_digits, y_digits)
+        }
+        if order == 0 && exact {
+            order = compare_spans(self.data, x, y)
+        }
+        order
+    }
+
+    /// Order entries like towncrier: entries with issues before orphan entries,
+    /// those by their issues, orphans by their text.
+    fn compare_entries(self, _ a: u64, _ b: u64) -> i32 {
+        let mut a_issues = self.entry_issues(a)
+        let mut b_issues = self.entry_issues(b)
+        let empty = Span { start: 0, len: 0 }
+        let a_key = if a_issues.rows() == 0 { self.entry_text(a) } else { empty }
+        let b_key = if b_issues.rows() == 0 { self.entry_text(b) } else { empty }
+        let mut order = compare_spans(self.data, a_key, b_key)
+        let mut i: u64 = 0
+        while order == 0 && i < a_issues.rows() && i < b_issues.rows() {
+            order = self.compare_issues(a_issues.get(i, 0), b_issues.get(i, 0), false)
+            i += 1
+        }
+        if order == 0 {
+            order = compare_u64(a_issues.rows(), b_issues.rows())
+        }
+        a_issues.release()
+        b_issues.release()
+        order
+    }
+
+    /// Entries of fragment type `kind` in release notes order.
+    fn sorted_entries(self, _ kind: u64) -> Table {
+        let mut sorted = Table::new(1)
+        let mut e: u64 = 0
+        while e < self.entries.rows() {
+            if self.entries.get(e, ENTRY_TYPE) == kind {
+                // Stable insertion sort.
+                sorted.push(e)
+                let mut i = sorted.rows() - 1
+                while i > 0 && self.compare_entries(sorted.get(i - 1, 0), e) > 0 {
+                    sorted.set(i, 0, sorted.get(i - 1, 0))
+                    i -= 1
+                }
+                sorted.set(i, 0, e)
+            }
+            e += 1
+        }
+        sorted
+    }
+
+    /// Append the release notes for `version`: the title and all sections.
+    pub fn render(self, _ out: mut ByteBuffer, version: Span, date: Span) {
+        push_title(mut out, self.data, version, date)
+        push_lit(mut out, "\n\n")
+        if self.entries.rows() == 0 {
+            push_lit(mut out, "No significant changes.\n\n")
+        }
+        let mut kind: u64 = 0
+        while kind < TYPE_COUNT {
+            self.render_section(mut out, kind)
+            kind += 1
+        }
+        push_lit(mut out, "\n")
+    }
+
+    fn render_section(self, _ out: mut ByteBuffer, _ kind: u64) {
+        let sorted = self.sorted_entries(kind)
+        if sorted.rows() > 0 {
+            push_lit(mut out, "### ")
+            push_type_name(mut out, kind)
+            push_lit(mut out, "\n\n")
+            let mut i: u64 = 0
+            while i < sorted.rows() {
+                self.render_entry(mut out, sorted.get(i, 0))
+                i += 1
+            }
+            push_lit(mut out, "\n")
+        }
+        sorted.release()
+    }
+
+    fn render_entry(self, _ out: mut ByteBuffer, _ entry: u64) {
+        let text = self.entry_text(entry)
+        let mut issues = self.entry_issues(entry)
+        let has_issues = issues.rows() > 0
+        if text.len > 0 || has_issues {
+            push_lit(mut out, "- ")
+            push_span(mut out, self.data, text)
+            if has_issues {
+                if text.len == 0 {
+                    // Only the issue links.
+                } else if has_sublist(self.data, text) {
+                    push_lit(mut out, "\n\n  (")
+                } else {
+                    push_lit(mut out, " (")
+                }
+                let mut i: u64 = 0
+                while i < issues.rows() {
+                    if i > 0 {
+                        push_lit(mut out, ", ")
+                    }
+                    push_issue_link(mut out, self.data, self.issue(issues.get(i, 0)))
+                    i += 1
+                }
+                if text.len > 0 {
+                    push_lit(mut out, ")")
+                }
+            }
+            push_lit(mut out, "\n")
+        }
+        issues.release()
+    }
+
+    /// Append the changelog with the release notes inserted behind the start
+    /// marker, like `towncrier build` writes it.
+    pub fn render_changelog(self, _ out: mut ByteBuffer, version: Span, date: Span) -> Status {
+        let mut notes = ByteBuffer::new()
+        self.render(mut notes, version, date)
+        let mut title_len: u64 = 0
+        while notes.byte_at(title_len) != 10 {
+            title_len += 1
+        }
+        let title = Span { start: 0, len: title_len }
+        let mut marker = ByteBuffer::new()
+        push_start_string(mut marker)
+        let marker_span = Span { start: 0, len: marker.len() }
+
+        let mut previous = Span { start: 0, len: 0 }
+        if self.has_changelog {
+            let at = find_in(self.data, self.changelog, marker, marker_span)
+            if at < self.changelog.len {
+                push_span(mut out, self.data, rstrip(self.data, Span { start: self.changelog.start, len: at }))
+                push_lit(mut out, "\n\n")
+                push_span(mut out, marker, marker_span)
+                push_lit(mut out, "\n")
+                let rest = at + marker.len()
+                previous = lstrip(self.data, Span { start: self.changelog.start + rest, len: self.changelog.len - rest })
+            } else {
+                previous = lstrip(self.data, self.changelog)
+            }
+        }
+        let mut status = Status::Ok
+        if find_in(self.data, previous, notes, title) < previous.len {
+            status = Status::AlreadyReleased
+        } else if previous.len > 0 {
+            push_span(mut out, notes, Span { start: 0, len: notes.len() })
+            push_span(mut out, self.data, previous)
+        } else {
+            push_span(mut out, notes, rstrip(notes, Span { start: 0, len: notes.len() }))
+            push_lit(mut out, "\n")
+        }
+        notes.release()
+        marker.release()
+        status
+    }
+}
+
+/// Names that towncrier never treats as fragments.
+fn is_ignored(_ buf: ByteBuffer, _ name: Span) -> bool {
+    span_eq_lit_lower(buf, name, ".gitignore")
+        || span_eq_lit_lower(buf, name, ".gitkeep")
+        || span_eq_lit_lower(buf, name, ".keep")
+        || span_eq_lit_lower(buf, name, "readme")
+        || span_eq_lit_lower(buf, name, "readme.md")
+        || span_eq_lit_lower(buf, name, "readme.rst")
+}
+
+/// Drop leading zeros of a numeric issue, keeping a single `0`.
+fn normalize_issue(_ buf: ByteBuffer, _ issue: Span) -> Span {
+    if !all_digits(buf, issue) {
+        return issue
+    }
+    let mut start = issue.start
+    while start + 1 < issue.end() && buf.byte_at(start) == 48 {
+        start += 1
+    }
+    Span { start, len: issue.end() - start }
+}
+
+fn parse_counter(_ buf: ByteBuffer, _ digits: Span) -> u64 {
+    let mut value: u64 = 0
+    let mut i: u64 = 0
+    while i < digits.len {
+        // Counters only need to tell fragments apart; saturate instead of overflowing.
+        let digit = (buf.byte_at(digits.start + i) - 48) as u64
+        if value > (0xffffffffffffffff - digit) / 10 {
+            return 0xffffffffffffffff
+        }
+        value = value * 10 + digit
+        i += 1
+    }
+    value
+}
+
+/// The first run of ASCII digits in `span`, or an empty span at its end.
+fn first_digit_run(_ buf: ByteBuffer, _ span: Span) -> Span {
+    let mut start = span.start
+    while start < span.end() && !is_digit(buf.byte_at(start)) {
+        start += 1
+    }
+    let mut end = start
+    while end < span.end() && is_digit(buf.byte_at(end)) {
+        end += 1
+    }
+    Span { start, len: end - start }
+}
+
+/// 0: no digits, 1: some digits, 2: only digits.
+fn issue_class(_ issue: Span, _ digits: Span) -> u64 {
+    if digits.len == 0 {
+        0
+    } else if digits.len == issue.len {
+        2
+    } else {
+        1
+    }
+}
+
+/// Compare `x` without `x_cut` to `y` without `y_cut`.
+fn compare_without(_ buf: ByteBuffer, _ x: Span, _ x_cut: Span, _ y: Span, _ y_cut: Span) -> i32 {
+    let x_len = x.len - x_cut.len
+    let y_len = y.len - y_cut.len
+    let mut i: u64 = 0
+    while i < x_len && i < y_len {
+        let a = byte_without(buf, x, x_cut, i)
+        let b = byte_without(buf, y, y_cut, i)
+        if a != b {
+            return if a < b { -1 } else { 1 }
+        }
+        i += 1
+    }
+    compare_u64(x_len, y_len)
+}
+
+fn byte_without(_ buf: ByteBuffer, _ span: Span, _ cut: Span, _ index: u64) -> u8 {
+    let at = span.start + index
+    if at < cut.start { buf.byte_at(at) } else { buf.byte_at(at + cut.len) }
+}
+
+/// Compare two decimal numbers of any length. Empty runs are smaller than any number.
+fn compare_numbers(_ buf: ByteBuffer, _ x: Span, _ y: Span) -> i32 {
+    if x.len == 0 || y.len == 0 {
+        return compare_u64(x.len, y.len)
+    }
+    let a = skip_zeros(buf, x)
+    let b = skip_zeros(buf, y)
+    let order = compare_u64(a.len, b.len)
+    if order != 0 {
+        return order
+    }
+    compare_spans(buf, a, b)
+}
+
+fn skip_zeros(_ buf: ByteBuffer, _ digits: Span) -> Span {
+    let mut start = digits.start
+    while start < digits.end() && buf.byte_at(start) == 48 {
+        start += 1
+    }
+    Span { start, len: digits.end() - start }
+}
+
+/// Whether the text contains a nested markdown list, which moves the issue
+/// links onto their own line.
+fn has_sublist(_ buf: ByteBuffer, _ text: Span) -> bool {
+    let mut i: u64 = 0
+    while i + 5 <= text.len {
+        let at = text.start + i
+        let bullet = buf.byte_at(at + 3)
+        if buf.byte_at(at) == 10 && buf.byte_at(at + 1) == 32 && buf.byte_at(at + 2) == 32
+            && (bullet == 45 || bullet == 42) && buf.byte_at(at + 4) == 32
+        {
+            return true
+        }
+        i += 1
+    }
+    false
+}
