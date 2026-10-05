@@ -10,13 +10,8 @@ For markdown changelogs eisenbote produces the same bytes as towncrier 25.8.
 The test suite checks this on a range of edge cases and settings, and by
 replaying all 38 Fe releases since 2021.
 
-The repository is a Fe workspace:
-
-- `ingots/eisenbote`: the release notes tool.
-- `ingots/toml`: a TOML 1.0 parser, used for the settings. It passes all
-  TOML 1.0 cases of the [toml-test](https://github.com/toml-lang/toml-test)
-  suite and is meant to become its own library.
-- `tools/toml_decoder`: the toml-test decoder for that library.
+The settings are read with [lutz](../lutz), a TOML 1.0 parser in Fe, which
+is expected next to this repository (`../lutz`).
 
 ## Usage
 
@@ -96,7 +91,6 @@ Linux or AArch64 macOS:
 ```sh
 make FE=/path/to/fe            # builds out/eisenbote
 make test FE=/path/to/fe       # Fe unit tests and tests/test_eisenbote.py
-make test FE=... TOML_TEST=/path/to/toml-test   # also the toml-test suite
 ```
 
 `tests/test_eisenbote.py` compares against towncrier when it is installed,
@@ -120,7 +114,7 @@ So the work is split:
 - `bin/eisenbote` (a POSIX shell script) finds the settings, produces that
   stream, writes the result back and runs `git`.
 
-Both ingots keep their data in as few heap buffers as possible: borrow
+eisenbote and lutz keep their data in as few heap buffers as possible: borrow
 checking time grows quickly with the number of distinct buffers a loop
 writes to (see below).
 
@@ -144,7 +138,7 @@ go once they are merged:
 - `fix/diagnostics-color-choice`: diagnostics ignored `--color never` and
   were colored even when piped.
 - `fix/runtime-as-bytes`: `AsBytes::as_bytes` failed in codegen when the value
-  wasn't a literal at the call site. Both ingots use a `Key` trait over
+  wasn't a literal at the call site. eisenbote and lutz use a `Key` trait over
   `String::as_bytes` and split long literals instead.
 - `fix/string-literal-const-generic-inference`: a string literal couldn't
   infer `N` of a `String<N>` or `[u8; N]` parameter.
@@ -156,13 +150,14 @@ go once they are merged:
 - `fix/option-copy`: `Option` and `Result` weren't `Copy`, so an `Option`
   field couldn't be read out of `self`.
 - `fix/recursive-summary-convergence`: a recursive `mut self` method that
-  writes bytes in a loop was rejected. The TOML parser is iterative anyway.
+  writes bytes in a loop was rejected. lutz parses iteratively anyway.
 - `fix/continue-in-else-if-chain`: code after an `if`/`else if` chain whose
   last branch returns was compiled as unreachable when an earlier branch
   continued the loop. The UTF-8 check avoids `continue`.
 - `fix/assoc-item-trait-scope`: `Self::SIZE` became ambiguous when a trait of
   a dependency, not even imported, had an item of the same name. eisenbote
-  reuses the TOML library's `Key` trait.
-- `perf/borrowck-reuse-overwrite-replacements` and a branch for the
-  exponential cost per written buffer: borrow checking these ingots takes
-  minutes.
+  reuses lutz's `Key` trait.
+- `perf/borrowck-reuse-overwrite-replacements`: borrow checking takes many
+  minutes, growing steeply with the number of buffers a function writes to.
+  This branch removes about 20%; the remaining cost needs a change to how
+  the borrow checker represents clobber conditions.

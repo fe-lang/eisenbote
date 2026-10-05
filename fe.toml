@@ -2,7 +2,5 @@
 name = "eisenbote"
 version = "0.1.0"
 members = [
-  { path = "ingots/toml", name = "toml" },
   { path = "ingots/eisenbote", name = "eisenbote" },
-  { path = "tools/toml_decoder", name = "toml_decoder" },
 ]

@@ -12,7 +12,7 @@ use ingot::news::{
     TYPE_DIRECTORY_LEN, TYPE_DIRECTORY_START, TYPE_NAME_LEN, TYPE_NAME_START, TYPE_SHOWS_CONTENT,
 }
 use std::native::ByteBuffer
-use toml::{Document, Error, NONE}
+use lutz::{Document, Error, NONE}
 
 // Fields of format strings.
 const FIELD_NAME: u64 = 1
@@ -28,7 +28,7 @@ impl News {
             push_lit(mut self.data, "no settings file")
             return self.end_message()
         }
-        let doc = toml::parse(self.data, self.settings.start, self.settings.len)
+        let doc = lutz::parse(self.data, self.settings.start, self.settings.len)
         let status = self.apply_settings(doc)
         doc.release()
         status
@@ -196,7 +196,7 @@ impl News {
         Status::Ok
     }
 
-    fn copy_doc_span(mut self, _ doc: Document, _ span: toml::Span) -> Span {
+    fn copy_doc_span(mut self, _ doc: Document, _ span: lutz::Span) -> Span {
         let start = self.data.len()
         let mut i: u64 = 0
         while i < span.len {
@@ -732,7 +732,7 @@ fn lookup<T: Literal>(_ doc: Document, _ table: u64, _ key: T) -> u64 {
     }
 }
 
-fn is_key<T: Literal>(_ doc: Document, _ key: toml::Span, _ name: T) -> bool {
+fn is_key<T: Literal>(_ doc: Document, _ key: lutz::Span, _ name: T) -> bool {
     let bytes = name.bytes()
     if key.len as usize != T::SIZE {
         return false

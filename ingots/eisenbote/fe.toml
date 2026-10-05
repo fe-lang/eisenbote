@@ -3,4 +3,5 @@ name = "eisenbote"
 version = "0.1.0"
 
 [dependencies]
-toml = true
+# lutz, the TOML parser, checked out next to this repository.
+lutz = { path = "../../../lutz/ingots/lutz" }

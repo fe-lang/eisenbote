@@ -22,7 +22,7 @@ pub fn push(_ buf: mut ByteBuffer, _ byte: u8) {
 }
 
 /// String literals, as in `push_lit(mut buf, "text")`.
-pub use toml::Key as Literal
+pub use lutz::Key as Literal
 
 pub fn push_lit<T: Literal>(_ buf: mut ByteBuffer, _ text: T) {
     let bytes = text.bytes()
