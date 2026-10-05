@@ -1,0 +1,88 @@
+//! File name patterns as in Python's `fnmatch`: `*`, `?`, `[seq]` and `[!seq]`.
+
+use ingot::buf::{Span, to_lower}
+use std::native::ByteBuffer
+
+/// Whether `name`, in ASCII lower case, matches `pattern` (both spans of `buf`).
+pub fn matches_lower(_ buf: ByteBuffer, _ pattern: Span, _ name: Span) -> bool {
+    let mut p: u64 = 0
+    let mut n: u64 = 0
+    // Where to resume after the last `*`: pattern and name positions.
+    let mut star = pattern.len
+    let mut star_name: u64 = 0
+    while n < name.len {
+        let c = to_lower(buf.byte_at(name.start + n))
+        let width = if p < pattern.len { item_width(buf, pattern, p) } else { 0 }
+        if p < pattern.len && buf.byte_at(pattern.start + p) == 42 {
+            star = p
+            star_name = n
+            p += 1
+        } else if width > 0 && item_matches(buf, pattern, p, width, c) {
+            p += width
+            n += 1
+        } else if star < pattern.len {
+            star_name += 1
+            n = star_name
+            p = star + 1
+        } else {
+            return false
+        }
+    }
+    while p < pattern.len && buf.byte_at(pattern.start + p) == 42 {
+        p += 1
+    }
+    p == pattern.len
+}
+
+/// The length of the pattern item at `p`: a byte, `?`, or a `[...]` class.
+/// An unclosed `[` is a literal byte.
+fn item_width(_ buf: ByteBuffer, _ pattern: Span, _ p: u64) -> u64 {
+    if buf.byte_at(pattern.start + p) != 91 {
+        return 1
+    }
+    let mut i = p + 1
+    if i < pattern.len && buf.byte_at(pattern.start + i) == 33 {
+        i += 1
+    }
+    // A `]` right after `[` or `[!` is part of the class.
+    if i < pattern.len && buf.byte_at(pattern.start + i) == 93 {
+        i += 1
+    }
+    while i < pattern.len && buf.byte_at(pattern.start + i) != 93 {
+        i += 1
+    }
+    if i >= pattern.len { 1 } else { i - p + 1 }
+}
+
+fn item_matches(_ buf: ByteBuffer, _ pattern: Span, _ p: u64, _ width: u64, _ c: u8) -> bool {
+    let first = buf.byte_at(pattern.start + p)
+    if first == 63 {
+        return true
+    }
+    if width == 1 {
+        return first == c
+    }
+    let mut i = p + 1
+    let negate = buf.byte_at(pattern.start + i) == 33
+    if negate {
+        i += 1
+    }
+    let end = p + width - 1
+    let mut found = false
+    while i < end {
+        let low = buf.byte_at(pattern.start + i)
+        if i + 2 < end && buf.byte_at(pattern.start + i + 1) == 45 {
+            let high = buf.byte_at(pattern.start + i + 2)
+            if c >= low && c <= high {
+                found = true
+            }
+            i += 3
+        } else {
+            if c == low {
+                found = true
+            }
+            i += 1
+        }
+    }
+    found != negate
+}

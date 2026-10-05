@@ -1,86 +1,764 @@
-//! The release notes configuration. It mirrors the `[tool.towncrier]` table
-//! that the Fe repository used in `pyproject.toml`.
+//! The settings: towncrier's configuration keys, read with the `toml` ingot
+//! from `eisenbote.toml` (top level) or from the `[tool.towncrier]` table of
+//! `towncrier.toml` or `pyproject.toml`.
 
-use ingot::buf::{Span, push_lit, push_span, span_eq_lit}
+use core::Option
+use ingot::buf::{
+    Literal, Span, all_digits, push, push_lit, push_own_span, push_span, span_eq_lit,
+    to_lower,
+}
+use ingot::news::{
+    News, PATTERN_COLUMNS, Status, TITLE_DEFAULT, TITLE_FORMAT, TITLE_NONE, TYPE_COLUMNS,
+    TYPE_DIRECTORY_LEN, TYPE_DIRECTORY_START, TYPE_NAME_LEN, TYPE_NAME_START, TYPE_SHOWS_CONTENT,
+}
 use std::native::ByteBuffer
+use toml::{Document, Error, NONE}
 
-/// Number of fragment types. Types are identified by their index, which is
-/// also the order of their sections in the release notes.
-pub const TYPE_COUNT: u64 = 7
+// Fields of format strings.
+const FIELD_NAME: u64 = 1
+const FIELD_VERSION: u64 = 2
+const FIELD_DATE: u64 = 3
+const FIELD_ISSUE: u64 = 4
 
-/// Marks a fragment name whose type is not configured.
-pub const NO_TYPE: u64 = 0xffffffffffffffff
+impl News {
+    /// Parse the settings record and apply it.
+    pub fn load_settings(mut self) -> Status {
+        if !self.has_settings {
+            self.begin_message()
+            push_lit(mut self.data, "no settings file")
+            return self.end_message()
+        }
+        let doc = toml::parse(self.data, self.settings.start, self.settings.len)
+        let status = self.apply_settings(doc)
+        doc.release()
+        status
+    }
 
-/// Fragments whose issue starts with this prefix have no issue.
-pub const ORPHAN_PREFIX: u8 = 43 // '+'
+    fn apply_settings(mut self, _ doc: Document) -> Status {
+        if !doc.ok() {
+            self.begin_message()
+            push_own_span(mut self.data, self.settings_name)
+            push_lit(mut self.data, ": ")
+            self.push_toml_error(doc)
+            return self.end_message()
+        }
+        let mut table = doc.root()
+        if self.towncrier_file() {
+            table = lookup(doc, lookup(doc, doc.root(), "tool"), "towncrier")
+            if table == NONE || !doc.is_table(table) {
+                self.begin_message()
+                push_own_span(mut self.data, self.settings_name)
+                push_lit(mut self.data, " has no [tool.towncrier] table")
+                return self.end_message()
+            }
+        }
+        let status = self.check_keys(doc, table)
+        if !status.is_ok() {
+            return status
+        }
 
-/// Index of the fragment type named by `span`, or `NO_TYPE`.
-pub fn type_index(_ buf: ByteBuffer, _ span: Span) -> u64 {
-    if span_eq_lit(buf, span, "feature") {
+        // Defaults as in towncrier.
+        if !self.string_setting(doc, table, "directory", "") {
+            return self.end_message()
+        }
+        let directory_given = lookup(doc, table, "directory") != NONE
+        if !directory_given {
+            self.begin_message()
+            push_lit(mut self.data, "`directory` must be set")
+            return self.end_message()
+        }
+        self.directory = self.last_string
+        if !self.string_setting(doc, table, "filename", "NEWS.rst") {
+            return self.end_message()
+        }
+        self.filename = self.last_string
+        if !self.ends_with_md(self.filename) {
+            self.begin_message()
+            push_lit(mut self.data, "only markdown changelogs ")
+            push_lit(mut self.data, "(`filename` ending in .md) ")
+            push_lit(mut self.data, "are supported")
+            return self.end_message()
+        }
+        if !self.string_setting(doc, table, "start_string", "") {
+            return self.end_message()
+        }
+        self.start_string = self.last_string
+        if self.start_string.len == 0 {
+            let start = self.data.len()
+            push_lit(mut self.data, "<!-- towncrier release ")
+            push_lit(mut self.data, "notes start -->\n")
+            self.start_string = Span { start, len: self.data.len() - start }
+        }
+        if !self.string_setting(doc, table, "name", "") {
+            return self.end_message()
+        }
+        self.project_name = self.last_string
+        if !self.string_setting(doc, table, "version", "") {
+            return self.end_message()
+        }
+        self.version = self.last_string
+        if !self.string_setting(doc, table, "orphan_prefix", "+") {
+            return self.end_message()
+        }
+        self.orphan_prefix = self.last_string
+        if !self.load_title_format(doc, table) {
+            return self.end_message()
+        }
+        if !self.load_issue_format(doc, table) {
+            return self.end_message()
+        }
+        if !self.require_bool(doc, table, "wrap", false) || !self.require_bool(doc, table, "all_bullets", true)
+            || !self.require_bool(doc, table, "single_file", true)
+        {
+            return self.end_message()
+        }
+        if !self.load_ignore(doc, table) {
+            return self.end_message()
+        }
+        if !self.load_types(doc, table) {
+            return self.end_message()
+        }
+        Status::Ok
+    }
+
+    /// Append `line <l>, column <c>: <description>` for the settings' parse
+    /// error, like `Document::push_error` (which needs a separate buffer).
+    fn push_toml_error(mut self, _ doc: Document) {
+        let offset = doc.error_offset()
+        let mut line: u64 = 1
+        let mut column: u64 = 1
+        let mut i: u64 = 0
+        while i < offset && i < self.settings.len {
+            let c = self.data.byte_at(self.settings.start + i)
+            if c == 10 {
+                line += 1
+                column = 1
+            } else if c & 0xc0 != 0x80 {
+                column += 1
+            }
+            i += 1
+        }
+        push_lit(mut self.data, "line ")
+        push_decimal(mut self.data, line)
+        push_lit(mut self.data, ", column ")
+        push_decimal(mut self.data, column)
+        push_lit(mut self.data, ": ")
+        match doc.error() {
+            Option::Some(error) => push_error_text(mut self.data, error)
+            Option::None => {}
+        }
+    }
+
+    fn towncrier_file(self) -> bool {
+        self.name_ends_with(self.settings_name, "pyproject.toml")
+            || self.name_ends_with(self.settings_name, "towncrier.toml")
+    }
+
+    fn name_ends_with<T: Literal>(self, _ name: Span, _ suffix: T) -> bool {
+        let size: u64 = T::SIZE.downcast_unchecked()
+        name.len >= size && span_eq_lit(self.data, Span { start: name.end() - size, len: size }, suffix)
+    }
+
+    fn ends_with_md(self, _ name: Span) -> bool {
+        self.name_ends_with(name, ".md")
+    }
+
+    /// Reject unknown keys, and keys whose behavior isn't implemented.
+    fn check_keys(mut self, _ doc: Document, _ table: u64) -> Status {
+        let mut entry = doc.first(table)
+        while entry != NONE {
+            let key = doc.key(entry)
+            if !is_key(doc, key, "directory") && !is_key(doc, key, "filename")
+                && !is_key(doc, key, "start_string") && !is_key(doc, key, "title_format")
+                && !is_key(doc, key, "issue_format") && !is_key(doc, key, "name")
+                && !is_key(doc, key, "version") && !is_key(doc, key, "orphan_prefix")
+                && !is_key(doc, key, "underlines") && !is_key(doc, key, "wrap")
+                && !is_key(doc, key, "all_bullets") && !is_key(doc, key, "single_file")
+                && !is_key(doc, key, "ignore") && !is_key(doc, key, "type")
+                && !is_key(doc, key, "fragment") && !is_key(doc, key, "create_eof_newline")
+                && !is_key(doc, key, "create_add_extension")
+            {
+                self.begin_message()
+                let supported = is_key(doc, key, "template") || is_key(doc, key, "section")
+                    || is_key(doc, key, "package") || is_key(doc, key, "package_dir")
+                    || is_key(doc, key, "issue_pattern")
+                push_lit(mut self.data, "setting `")
+                self.copy_doc_span(doc, key)
+                if supported {
+                    push_lit(mut self.data, "` is not supported")
+                } else {
+                    push_lit(mut self.data, "` is unknown")
+                }
+                return self.end_message()
+            }
+            entry = doc.next(entry)
+        }
+        Status::Ok
+    }
+
+    fn copy_doc_span(mut self, _ doc: Document, _ span: toml::Span) -> Span {
+        let start = self.data.len()
+        let mut i: u64 = 0
+        while i < span.len {
+            push(mut self.data, doc.byte_at(span.start + i))
+            i += 1
+        }
+        Span { start, len: self.data.len() - start }
+    }
+
+    /// Copy the string setting `key` (or `default`) into the data buffer as
+    /// `last_string`. On a non-string value, begins an error message and
+    /// returns false.
+    fn string_setting<K: Literal, D: Literal>(mut self, _ doc: Document, _ table: u64, _ key: K, _ default: D) -> bool {
+        let node = lookup(doc, table, key)
+        if node == NONE {
+            let start = self.data.len()
+            push_lit(mut self.data, default)
+            self.last_string = Span { start, len: self.data.len() - start }
+            return true
+        }
+        if !doc.is_string(node) {
+            self.begin_message()
+            push_lit(mut self.data, "setting `")
+            push_lit(mut self.data, key)
+            push_lit(mut self.data, "` must be a string")
+            return false
+        }
+        self.last_string = self.copy_doc_span(doc, doc.value(node))
+        true
+    }
+
+    /// Settings that must keep the only value eisenbote implements.
+    fn require_bool<K: Literal>(mut self, _ doc: Document, _ table: u64, _ key: K, _ supported: bool) -> bool {
+        let node = lookup(doc, table, key)
+        if node == NONE {
+            return true
+        }
+        if !doc.is_boolean(node) {
+            self.begin_message()
+            push_lit(mut self.data, "setting `")
+            push_lit(mut self.data, key)
+            push_lit(mut self.data, "` must be true or false")
+            return false
+        }
+        if doc.boolean(node) != supported {
+            self.begin_message()
+            push_lit(mut self.data, "setting `")
+            push_lit(mut self.data, key)
+            push_lit(mut self.data, "` is only supported as ")
+            if supported {
+                push_lit(mut self.data, "true")
+            } else {
+                push_lit(mut self.data, "false")
+            }
+            return false
+        }
+        true
+    }
+
+    /// `title_format`: a format string, `false` for no title, or `""` (the
+    /// default) for a title rendered by the template.
+    fn load_title_format(mut self, _ doc: Document, _ table: u64) -> bool {
+        let node = lookup(doc, table, "title_format")
+        self.title_mode = TITLE_DEFAULT
+        self.header_level = 1
+        if node == NONE {
+            return true
+        }
+        if doc.is_boolean(node) && !doc.boolean(node) {
+            self.title_mode = TITLE_NONE
+            self.header_level = 0
+            return true
+        }
+        if !doc.is_string(node) {
+            self.begin_message()
+            push_lit(mut self.data, "setting `title_format` must ")
+            push_lit(mut self.data, "be a string or false")
+            return false
+        }
+        self.title_format = self.copy_doc_span(doc, doc.value(node))
+        if self.title_format.len == 0 {
+            return true
+        }
+        self.title_mode = TITLE_FORMAT
+        if !self.check_format(self.title_format, false) {
+            return false
+        }
+        self.header_level = self.leading_hashes(self.title_format)
+        true
+    }
+
+    /// Like towncrier: the `#`s that start a line of the title and are
+    /// followed by whitespace, or 0.
+    fn leading_hashes(self, _ format: Span) -> u64 {
+        let mut line = format.start
+        while line < format.end() {
+            let mut i = line
+            while i < format.end() && self.data.byte_at(i) == 35 {
+                i += 1
+            }
+            if i > line && i < format.end() && ingot::buf::is_space(self.data.byte_at(i)) {
+                return i - line
+            }
+            while i < format.end() && self.data.byte_at(i) != 10 {
+                i += 1
+            }
+            line = i + 1
+        }
         0
-    } else if span_eq_lit(buf, span, "bugfix") {
-        1
-    } else if span_eq_lit(buf, span, "performance") {
-        2
-    } else if span_eq_lit(buf, span, "doc") {
-        3
-    } else if span_eq_lit(buf, span, "removal") {
-        4
-    } else if span_eq_lit(buf, span, "internal") {
-        5
-    } else if span_eq_lit(buf, span, "misc") {
-        6
-    } else {
-        NO_TYPE
+    }
+
+    fn load_issue_format(mut self, _ doc: Document, _ table: u64) -> bool {
+        let node = lookup(doc, table, "issue_format")
+        if node == NONE {
+            return true
+        }
+        if !doc.is_string(node) {
+            self.begin_message()
+            push_lit(mut self.data, "setting `issue_format` must ")
+            push_lit(mut self.data, "be a string")
+            return false
+        }
+        self.has_issue_format = true
+        self.issue_format = self.copy_doc_span(doc, doc.value(node))
+        if !self.check_format(self.issue_format, true) {
+            return false
+        }
+        // towncrier turns formats like "[#{issue}]: url" into link references.
+        let mut i = self.issue_format.start
+        while i + 3 <= self.issue_format.end() {
+            if self.data.byte_at(i) == 93 && self.data.byte_at(i + 1) == 58 && self.data.byte_at(i + 2) == 32 {
+                self.begin_message()
+                push_lit(mut self.data, "link reference issue formats ")
+                push_lit(mut self.data, "are not supported")
+                return false
+            }
+            i += 1
+        }
+        true
+    }
+
+    /// Check that `format` only uses `{name}`, `{version}` and `{project_date}`,
+    /// or with `issue` only `{issue}`, and that braces are balanced.
+    fn check_format(mut self, _ format: Span, _ issue: bool) -> bool {
+        let mut i = format.start
+        while i < format.end() {
+            let width = self.format_item(format, i, issue)
+            if width == 0 {
+                self.begin_message()
+                push_lit(mut self.data, "invalid format string: ")
+                push_own_span(mut self.data, format)
+                return false
+            }
+            i += width
+        }
+        true
+    }
+
+    /// The width of the format item at `at` (a literal byte, an escaped brace
+    /// or a field), or 0 if it is invalid.
+    fn format_item(self, _ format: Span, _ at: u64, _ issue: bool) -> u64 {
+        let c = self.data.byte_at(at)
+        let next: u8 = if at + 1 < format.end() { self.data.byte_at(at + 1) } else { 0 }
+        if (c == 123 && next == 123) || (c == 125 && next == 125) {
+            return 2
+        }
+        if c == 125 {
+            return 0
+        }
+        if c != 123 {
+            return 1
+        }
+        let field = self.field_at(format, at)
+        if field == 0 || (issue != (field == FIELD_ISSUE)) {
+            return 0
+        }
+        self.field_width(field)
+    }
+
+    /// The field whose `{...}` starts at `at`, or 0.
+    fn field_at(self, _ format: Span, _ at: u64) -> u64 {
+        let rest = Span { start: at, len: format.end() - at }
+        if self.starts_with(rest, "{name}") {
+            FIELD_NAME
+        } else if self.starts_with(rest, "{version}") {
+            FIELD_VERSION
+        } else if self.starts_with(rest, "{project_date}") {
+            FIELD_DATE
+        } else if self.starts_with(rest, "{issue}") {
+            FIELD_ISSUE
+        } else {
+            0
+        }
+    }
+
+    fn field_width(self, _ field: u64) -> u64 {
+        if field == FIELD_NAME {
+            6
+        } else if field == FIELD_VERSION {
+            9
+        } else if field == FIELD_DATE {
+            14
+        } else {
+            7
+        }
+    }
+
+    fn starts_with<T: Literal>(self, _ span: Span, _ prefix: T) -> bool {
+        let size: u64 = T::SIZE.downcast_unchecked()
+        span.len >= size && span_eq_lit(self.data, Span { start: span.start, len: size }, prefix)
+    }
+
+    /// Append `format` with its fields replaced.
+    fn push_format(self, _ out: mut ByteBuffer, _ format: Span, _ version: Span, _ date: Span, _ issue: Span) {
+        let mut i = format.start
+        while i < format.end() {
+            let c = self.data.byte_at(i)
+            if c == 123 || c == 125 {
+                let field = if c == 123 { self.field_at(format, i) } else { 0 }
+                if field == 0 {
+                    // An escaped brace.
+                    push(mut out, c)
+                    i += 2
+                } else {
+                    let value = if field == FIELD_NAME {
+                        self.project_name
+                    } else if field == FIELD_VERSION {
+                        version
+                    } else if field == FIELD_DATE {
+                        date
+                    } else {
+                        issue
+                    }
+                    push_span(mut out, self.data, value)
+                    i += self.field_width(field)
+                }
+            } else {
+                push(mut out, c)
+                i += 1
+            }
+        }
+    }
+
+    /// Append the formatted `title_format`.
+    pub fn push_title(self, _ out: mut ByteBuffer, _ version: Span, _ date: Span) {
+        self.push_format(mut out, self.title_format, version, date, Span { start: 0, len: 0 })
+    }
+
+    /// Append an issue reference: `issue_format`, or `#<issue>` for numbers.
+    pub fn push_issue(self, _ out: mut ByteBuffer, _ issue: Span) {
+        if self.has_issue_format {
+            let empty = Span { start: 0, len: 0 }
+            self.push_format(mut out, self.issue_format, empty, empty, issue)
+        } else {
+            if all_digits(self.data, issue) {
+                push(mut out, 35)
+            }
+            push_span(mut out, self.data, issue)
+        }
+    }
+
+    /// `ignore`: file name patterns (fnmatch style) that are never fragments.
+    /// Setting it makes misnamed files errors, as in towncrier.
+    fn load_ignore(mut self, _ doc: Document, _ table: u64) -> bool {
+        let node = lookup(doc, table, "ignore")
+        if node == NONE {
+            return true
+        }
+        if !doc.is_array(node) {
+            return self.ignore_error()
+        }
+        self.strict = true
+        self.patterns_base = self.reserve(doc.len(node), PATTERN_COLUMNS)
+        let mut item = doc.first(node)
+        while item != NONE {
+            if !doc.is_string(item) {
+                return self.ignore_error()
+            }
+            let pattern = self.copy_doc_span(doc, doc.value(item))
+            let mut i = pattern.start
+            while i < pattern.end() {
+                self.data.set_byte(index: i, value: to_lower(self.data.byte_at(i)))
+                i += 1
+            }
+            self.set_pattern_span(self.pattern_count, pattern)
+            self.pattern_count += 1
+            item = doc.next(item)
+        }
+        true
+    }
+
+    fn ignore_error(mut self) -> bool {
+        self.begin_message()
+        push_lit(mut self.data, "setting `ignore` must be an ")
+        push_lit(mut self.data, "array of strings")
+        false
+    }
+
+    /// The fragment types: `[fragment.<directory>]` tables (sorted by
+    /// directory), `[[type]]` entries (in order), or towncrier's defaults.
+    fn load_types(mut self, _ doc: Document, _ table: u64) -> bool {
+        let fragments = lookup(doc, table, "fragment")
+        let types = lookup(doc, table, "type")
+        if fragments != NONE {
+            return self.load_fragment_tables(doc, fragments)
+        }
+        if types != NONE {
+            return self.load_type_array(doc, types)
+        }
+        self.types_base = self.reserve(5, TYPE_COLUMNS)
+        self.add_default_type("feature", "Features", true)
+        self.add_default_type("bugfix", "Bugfixes", true)
+        self.add_default_type("doc", "Improved Documentation", true)
+        self.add_default_type("removal", "Deprecations and Removals", true)
+        self.add_default_type("misc", "Misc", false)
+        true
+    }
+
+    fn add_default_type<D: Literal, N: Literal>(mut self, _ directory: D, _ name: N, _ shows_content: bool) {
+        let directory_start = self.data.len()
+        push_lit(mut self.data, directory)
+        let name_start = self.data.len()
+        push_lit(mut self.data, name)
+        self.add_type(
+            Span { start: directory_start, len: name_start - directory_start },
+            Span { start: name_start, len: self.data.len() - name_start },
+            shows_content,
+        )
+    }
+
+    /// Add a type to the reserved region; a repeated directory updates the
+    /// earlier type in place.
+    fn add_type(mut self, _ directory: Span, _ name: Span, _ shows_content: bool) {
+        let mut row = self.type_index(directory)
+        if row == ingot::news::NONE {
+            row = self.type_count
+            self.type_count += 1
+        }
+        self.type_set(row, TYPE_DIRECTORY_START, directory.start)
+        self.type_set(row, TYPE_DIRECTORY_LEN, directory.len)
+        self.type_set(row, TYPE_NAME_START, name.start)
+        self.type_set(row, TYPE_NAME_LEN, name.len)
+        self.type_set(row, TYPE_SHOWS_CONTENT, if shows_content { 1 } else { 0 })
+    }
+
+    fn load_type_array(mut self, _ doc: Document, _ types: u64) -> bool {
+        if !doc.is_array(types) {
+            return self.type_error()
+        }
+        self.types_base = self.reserve(doc.len(types), TYPE_COLUMNS)
+        let mut item = doc.first(types)
+        while item != NONE {
+            if !doc.is_table(item) || !self.check_type_keys(doc, item) {
+                return self.type_error()
+            }
+            let name_node = lookup(doc, item, "name")
+            if name_node == NONE || !doc.is_string(name_node) {
+                return self.type_error()
+            }
+            let name = self.copy_doc_span(doc, doc.value(name_node))
+            let directory_node = lookup(doc, item, "directory")
+            let mut directory = Span { start: 0, len: 0 }
+            if directory_node == NONE {
+                // towncrier uses the lower-case name.
+                directory = self.lowered_copy(name)
+            } else if doc.is_string(directory_node) {
+                directory = self.copy_doc_span(doc, doc.value(directory_node))
+            } else {
+                return self.type_error()
+            }
+            let shows = self.shows_content(doc, item)
+            if shows > 1 {
+                return self.type_error()
+            }
+            self.add_type(directory, name, shows == 1)
+            item = doc.next(item)
+        }
+        true
+    }
+
+    fn load_fragment_tables(mut self, _ doc: Document, _ fragments: u64) -> bool {
+        if !doc.is_table(fragments) {
+            return self.type_error()
+        }
+        // Sort the entries by directory, then add them in that order.
+        let count = doc.len(fragments)
+        let order = self.reserve(count, 1)
+        let mut entry = doc.first(fragments)
+        let mut n: u64 = 0
+        while entry != NONE {
+            let mut i = n
+            while i > 0 && compare_keys(doc, self.word(order + (i - 1) * 8), entry) > 0 {
+                self.set_word(order + i * 8, self.word(order + (i - 1) * 8))
+                i -= 1
+            }
+            self.set_word(order + i * 8, entry)
+            n += 1
+            entry = doc.next(entry)
+        }
+        self.types_base = self.reserve(count, TYPE_COLUMNS)
+        let mut k: u64 = 0
+        while k < count {
+            if !self.add_fragment_table(doc, self.word(order + k * 8)) {
+                return false
+            }
+            k += 1
+        }
+        true
+    }
+
+    fn add_fragment_table(mut self, _ doc: Document, _ entry: u64) -> bool {
+        if !doc.is_table(entry) || !self.check_type_keys(doc, entry) {
+            return self.type_error()
+        }
+        let directory = self.copy_doc_span(doc, doc.key(entry))
+        let name_node = lookup(doc, entry, "name")
+        let mut name = Span { start: 0, len: 0 }
+        if name_node == NONE {
+            // Python's str.capitalize.
+            name = self.lowered_copy(directory)
+            if name.len > 0 {
+                let first = self.data.byte_at(name.start)
+                if first >= 97 && first <= 122 {
+                    self.data.set_byte(index: name.start, value: first - 32)
+                }
+            }
+        } else if doc.is_string(name_node) {
+            name = self.copy_doc_span(doc, doc.value(name_node))
+        } else {
+            return self.type_error()
+        }
+        let shows = self.shows_content(doc, entry)
+        if shows > 1 {
+            return self.type_error()
+        }
+        self.add_type(directory, name, shows == 1)
+        true
+    }
+
+    /// `showcontent` of a type: 1 (the default) or 0, or 2 if it isn't a boolean.
+    fn shows_content(self, _ doc: Document, _ table: u64) -> u64 {
+        let node = lookup(doc, table, "showcontent")
+        if node == NONE {
+            return 1
+        }
+        if !doc.is_boolean(node) {
+            return 2
+        }
+        if doc.boolean(node) { 1 } else { 0 }
+    }
+
+    fn check_type_keys(self, _ doc: Document, _ table: u64) -> bool {
+        let mut entry = doc.first(table)
+        while entry != NONE {
+            let key = doc.key(entry)
+            if !is_key(doc, key, "name") && !is_key(doc, key, "directory")
+                && !is_key(doc, key, "showcontent") && !is_key(doc, key, "check")
+            {
+                return false
+            }
+            entry = doc.next(entry)
+        }
+        true
+    }
+
+    fn type_error(mut self) -> bool {
+        self.begin_message()
+        push_lit(mut self.data, "invalid fragment types: use ")
+        push_lit(mut self.data, "[[type]] tables with a `name`, ")
+        push_lit(mut self.data, "or [fragment.<directory>] ")
+        push_lit(mut self.data, "tables ")
+        push_lit(mut self.data, "(optional `name`, `directory`, ")
+        push_lit(mut self.data, "`showcontent`)")
+        false
+    }
+
+    /// Copy `span` in ASCII lower case.
+    fn lowered_copy(mut self, _ span: Span) -> Span {
+        let start = self.data.len()
+        let mut i: u64 = 0
+        while i < span.len {
+            let c = to_lower(self.data.byte_at(span.start + i))
+            push(mut self.data, c)
+            i += 1
+        }
+        Span { start, len: span.len }
     }
 }
 
-/// Append the section title of fragment type `index`.
-pub fn push_type_name(_ out: mut ByteBuffer, _ index: u64) {
-    if index == 0 {
-        push_lit(mut out, "Features")
-    } else if index == 1 {
-        push_lit(mut out, "Bugfixes")
-    } else if index == 2 {
-        push_lit(mut out, "Performance improvements")
-    } else if index == 3 {
-        push_lit(mut out, "Improved Documentation")
-    } else if index == 4 {
-        push_lit(mut out, "Deprecations and Removals")
-    } else if index == 5 {
-        push_lit(mut out, "Internal Changes - ")
-        push_lit(mut out, "for Fe Contributors")
-    } else {
-        push_lit(mut out, "Miscellaneous changes")
+fn push_decimal(_ buf: mut ByteBuffer, _ value: u64) {
+    let mut divisor: u64 = 1
+    while value / divisor >= 10 {
+        divisor *= 10
+    }
+    while divisor > 0 {
+        push(mut buf, (48 + (value / divisor) % 10).downcast_truncate())
+        divisor /= 10
     }
 }
 
-/// Whether fragments of this type contribute their text, or only their issue.
-pub fn shows_content(_ index: u64) -> bool {
-    index != 6
+fn push_error_text(_ out: mut ByteBuffer, _ error: Error) {
+    match error {
+        Error::InvalidUtf8 => push_lit(mut out, "invalid UTF-8")
+        Error::UnexpectedEnd => push_lit(mut out, "unexpected end of input")
+        Error::UnexpectedCharacter => push_lit(mut out, "unexpected character")
+        Error::ControlCharacter => push_lit(mut out, "control character")
+        Error::ExpectedNewline => push_lit(mut out, "expected a new line")
+        Error::ExpectedEquals => push_lit(mut out, "expected `=` after a key")
+        Error::ExpectedValue => push_lit(mut out, "expected a value")
+        Error::InvalidKey => push_lit(mut out, "invalid key")
+        Error::InvalidEscape => push_lit(mut out, "invalid escape sequence")
+        Error::InvalidNumber => push_lit(mut out, "invalid number")
+        Error::IntegerOutOfRange => push_lit(mut out, "integer out of range")
+        Error::InvalidDateTime => push_lit(mut out, "invalid date or time")
+        Error::DuplicateKey => push_lit(mut out, "duplicate key")
+        Error::TableRedefined => push_lit(mut out, "table defined twice")
+        Error::NotATable => push_lit(mut out, "key is not a table")
+        Error::Immutable => {
+            push_lit(mut out, "inline tables and arrays ")
+            push_lit(mut out, "can't be extended")
+        }
+    }
 }
 
-/// Append the link to `issue` (a span of `source`).
-pub fn push_issue_link(_ out: mut ByteBuffer, _ source: ByteBuffer, _ issue: Span) {
-    push_lit(mut out, "[#")
-    push_span(mut out, source, issue)
-    push_lit(mut out, "](https://github.com/")
-    push_lit(mut out, "argotorg/fe/issues/")
-    push_span(mut out, source, issue)
-    push_lit(mut out, ")")
+/// The entry `key` of `table`, or `NONE` (also when `table` is `NONE`).
+fn lookup<T: Literal>(_ doc: Document, _ table: u64, _ key: T) -> u64 {
+    if table == NONE {
+        return NONE
+    }
+    match doc.get(table, key) {
+        Option::Some(node) => node
+        Option::None => NONE
+    }
 }
 
-/// Append the release title.
-pub fn push_title(_ out: mut ByteBuffer, _ source: ByteBuffer, version: Span, date: Span) {
-    push_lit(mut out, "## ")
-    push_span(mut out, source, version)
-    push_lit(mut out, " (")
-    push_span(mut out, source, date)
-    push_lit(mut out, ")")
+fn is_key<T: Literal>(_ doc: Document, _ key: toml::Span, _ name: T) -> bool {
+    let bytes = name.bytes()
+    if key.len as usize != T::SIZE {
+        return false
+    }
+    let mut i: u64 = 0
+    while i < key.len {
+        if doc.byte_at(key.start + i) != bytes[i as usize] {
+            return false
+        }
+        i += 1
+    }
+    true
 }
 
-/// Append the marker behind which new releases are inserted into the changelog.
-pub fn push_start_string(_ out: mut ByteBuffer) {
-    push_lit(mut out, "[//]: # (towncrier ")
-    push_lit(mut out, "release notes start)")
+/// Compare the keys of two entries byte by byte.
+fn compare_keys(_ doc: Document, _ a: u64, _ b: u64) -> i32 {
+    let x = doc.key(a)
+    let y = doc.key(b)
+    let mut i: u64 = 0
+    while i < x.len && i < y.len {
+        let p = doc.byte_at(x.start + i)
+        let q = doc.byte_at(y.start + i)
+        if p != q {
+            return if p < q { -1 } else { 1 }
+        }
+        i += 1
+    }
+    ingot::buf::compare_u64(x.len, y.len)
 }

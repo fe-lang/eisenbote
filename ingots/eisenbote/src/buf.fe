@@ -21,19 +21,8 @@ pub fn push(_ buf: mut ByteBuffer, _ byte: u8) {
     buf.set_byte(index: len, value: byte)
 }
 
-/// String literals. Unlike `core::AsBytes`, `String::as_bytes` also works on
-/// runtime values (see fe branch `fix/runtime-as-bytes`).
-pub trait Literal {
-    const SIZE: usize
-    fn bytes(self) -> [u8; Self::SIZE]
-}
-
-impl<const LEN: usize> Literal for String<LEN> {
-    const SIZE: usize = LEN
-    fn bytes(self) -> [u8; Self::SIZE] {
-        self.as_bytes()
-    }
-}
+/// String literals, as in `push_lit(mut buf, "text")`.
+pub use toml::Key as Literal
 
 pub fn push_lit<T: Literal>(_ buf: mut ByteBuffer, _ text: T) {
     let bytes = text.bytes()

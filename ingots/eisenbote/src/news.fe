@@ -4,14 +4,32 @@ use ingot::buf::{
     Span, Table, all_digits, compare_spans, compare_u64, find_in, is_digit, lstrip, push,
     push_lit, push_own_span, push_span, rstrip, span_eq_lit_lower, spans_eq, strip,
 }
-use ingot::config::{
-    NO_TYPE, ORPHAN_PREFIX, TYPE_COUNT, push_issue_link, push_start_string, push_title,
-    push_type_name, shows_content, type_index,
-}
 use std::io::{Read, read_char}
 use std::native::ByteBuffer
 
-// Fragment table columns.
+/// Marks a missing type or row.
+pub const NONE: u64 = 0xffffffffffffffff
+
+// Everything lives in `News::data`: the input records, the derived text and
+// four tables of `u64` cells, each in its own region (reserved once its size
+// is known): fragment types and ignore patterns while loading the settings,
+// then the files of the fragment directory, then the entries. (Writing to a
+// single buffer keeps borrow checking fast.)
+
+// Type rows.
+pub const TYPE_DIRECTORY_START: u64 = 0
+pub const TYPE_DIRECTORY_LEN: u64 = 1
+pub const TYPE_NAME_START: u64 = 2
+pub const TYPE_NAME_LEN: u64 = 3
+pub const TYPE_SHOWS_CONTENT: u64 = 4
+pub const TYPE_COLUMNS: u64 = 5
+
+// Ignore rows: a lower-case file name pattern.
+pub const PATTERN_START: u64 = 0
+pub const PATTERN_LEN: u64 = 1
+pub const PATTERN_COLUMNS: u64 = 2
+
+// File rows.
 const NAME_START: u64 = 0
 const NAME_LEN: u64 = 1
 const CONTENT_START: u64 = 2
@@ -23,21 +41,33 @@ const COUNTER: u64 = 7
 const TEXT_START: u64 = 8
 const TEXT_LEN: u64 = 9
 const ENTRY: u64 = 10
-const FRAGMENT_COLUMNS: u64 = 11
+const FILE_COLUMNS: u64 = 11
 
-// Entry table columns. An entry is one bullet: a distinct text of one type,
-// together with the issues of all fragments that share it.
+// Entry rows. An entry is one bullet: a distinct text of one type, together
+// with the issues of all fragments that share it.
 const ENTRY_TYPE: u64 = 0
 const ENTRY_TEXT_START: u64 = 1
 const ENTRY_TEXT_LEN: u64 = 2
 const ENTRY_COLUMNS: u64 = 3
 
+// Records as stored by `read`: kind byte, name length (8 bytes), name,
+// content length (8 bytes), content.
+const RECORD_FILE: u8 = 70
+
+/// How the release title is produced (towncrier's `title_format`).
+pub const TITLE_DEFAULT: u64 = 0
+pub const TITLE_FORMAT: u64 = 1
+pub const TITLE_NONE: u64 = 2
+
 pub enum Status {
     Ok,
     MalformedInput,
-    DuplicateFragment,
     AlreadyReleased,
+    /// The message is in `News::message`.
+    Failed,
 }
+
+impl Copy for Status {}
 
 impl Status {
     pub fn is_ok(self) -> bool {
@@ -48,71 +78,211 @@ impl Status {
     }
 }
 
-/// All input files plus everything derived from them.
+/// The settings, all input files and everything derived from them.
 ///
 /// Input arrives on stdin as a sequence of records. Each record is a header
 /// line followed by exactly `<len>` bytes of file content:
 ///
-///     F <len> <file name>\n   a news fragment (or any other file in the fragment directory)
+///     S <len> <file name>\n   the settings (eisenbote.toml, towncrier.toml or pyproject.toml)
+///     F <len> <file name>\n   a file of the fragment directory
 ///     C <len>\n               the current changelog
 ///
-/// Line endings in contents are normalized to `\n`.
+/// Line endings in fragments and the changelog are normalized to `\n`.
 pub struct News {
-    /// File names and contents, followed by derived text.
+    /// The records, derived text and tables.
     pub data: ByteBuffer,
-    pub fragments: Table,
-    entries: Table,
+    /// Byte offsets of the table regions, and their row counts.
+    pub types_base: u64,
+    pub type_count: u64,
+    pub patterns_base: u64,
+    pub pattern_count: u64,
+    pub files_base: u64,
+    pub file_count: u64,
+    pub entries_base: u64,
+    pub entry_count: u64,
+    /// Where `read` put the records.
+    records: Span,
+    pub has_settings: bool,
+    pub settings: Span,
+    pub settings_name: Span,
     pub has_changelog: bool,
-    changelog: Span,
-    /// Index of the first fragment that is named like an existing one.
-    pub duplicate: u64,
+    pub changelog: Span,
+    /// The error message when a step fails.
+    pub message: Span,
+
+    // Settings.
+    pub directory: Span,
+    pub filename: Span,
+    pub start_string: Span,
+    pub project_name: Span,
+    pub version: Span,
+    pub orphan_prefix: Span,
+    pub title_mode: u64,
+    pub title_format: Span,
+    pub has_issue_format: bool,
+    pub issue_format: Span,
+    /// Number of `#` of the release title; sections get one more.
+    pub header_level: u64,
+    /// Whether misnamed files are errors (towncrier does this when `ignore` is set).
+    pub strict: bool,
+    /// The result of `string_setting`.
+    pub last_string: Span,
 }
 
 impl News {
     pub fn new() -> Self {
+        let empty = Span { start: 0, len: 0 }
         Self {
             data: ByteBuffer::new(),
-            fragments: Table::new(FRAGMENT_COLUMNS),
-            entries: Table::new(ENTRY_COLUMNS),
+            types_base: 0,
+            type_count: 0,
+            patterns_base: 0,
+            pattern_count: 0,
+            files_base: 0,
+            file_count: 0,
+            entries_base: 0,
+            entry_count: 0,
+            records: empty,
+            has_settings: false,
+            settings: empty,
+            settings_name: empty,
             has_changelog: false,
-            changelog: Span { start: 0, len: 0 },
-            duplicate: 0,
+            changelog: empty,
+            message: empty,
+            directory: empty,
+            filename: empty,
+            start_string: empty,
+            project_name: empty,
+            version: empty,
+            orphan_prefix: empty,
+            title_mode: TITLE_DEFAULT,
+            title_format: empty,
+            has_issue_format: false,
+            issue_format: empty,
+            header_level: 1,
+            strict: false,
+            last_string: empty,
         }
     }
 
     pub fn release(own self) {
         self.data.release()
-        self.fragments.release()
-        self.entries.release()
     }
 
-    pub fn fragment_count(self) -> u64 {
-        self.fragments.rows()
+    // Cells of the table regions.
+
+    pub fn word(self, _ at: u64) -> u64 {
+        let mut value: u64 = 0
+        let mut i: u64 = 8
+        while i > 0 {
+            i -= 1
+            value = (value << 8) | self.data.byte_at(at + i) as u64
+        }
+        value
     }
 
-    pub fn name(self, _ fragment: u64) -> Span {
-        Span { start: self.fragments.get(fragment, NAME_START), len: self.fragments.get(fragment, NAME_LEN) }
+    pub fn set_word(mut self, _ at: u64, _ value: u64) {
+        let mut i: u64 = 0
+        while i < 8 {
+            self.data.set_byte(index: at + i, value: ((value >> (i * 8)) & 0xff).downcast_truncate())
+            i += 1
+        }
     }
 
-    pub fn content(self, _ fragment: u64) -> Span {
-        Span { start: self.fragments.get(fragment, CONTENT_START), len: self.fragments.get(fragment, CONTENT_LEN) }
+    /// Reserve a zeroed table region of `rows` rows and return its offset.
+    pub fn reserve(mut self, _ rows: u64, _ columns: u64) -> u64 {
+        let base = self.data.len()
+        core::assert(self.data.try_resize(base + rows * columns * 8))
+        base
     }
 
-    fn issue(self, _ fragment: u64) -> Span {
-        Span { start: self.fragments.get(fragment, ISSUE_START), len: self.fragments.get(fragment, ISSUE_LEN) }
+    fn cell(self, _ base: u64, _ row: u64, _ columns: u64, _ column: u64) -> u64 {
+        base + (row * columns + column) * 8
     }
 
-    fn text(self, _ fragment: u64) -> Span {
-        Span { start: self.fragments.get(fragment, TEXT_START), len: self.fragments.get(fragment, TEXT_LEN) }
+    pub fn type_get(self, _ row: u64, _ column: u64) -> u64 {
+        self.word(self.cell(self.types_base, row, TYPE_COLUMNS, column))
     }
 
-    fn entry_text(self, _ entry: u64) -> Span {
-        Span { start: self.entries.get(entry, ENTRY_TEXT_START), len: self.entries.get(entry, ENTRY_TEXT_LEN) }
+    pub fn type_set(mut self, _ row: u64, _ column: u64, _ value: u64) {
+        self.set_word(self.cell(self.types_base, row, TYPE_COLUMNS, column), value)
     }
 
-    /// Whether the fragment is a news fragment of a configured type.
-    pub fn is_news(self, _ fragment: u64) -> bool {
-        self.fragments.get(fragment, TYPE) != NO_TYPE
+    pub fn type_span(self, _ row: u64, _ column: u64) -> Span {
+        Span { start: self.type_get(row, column), len: self.type_get(row, column + 1) }
+    }
+
+    pub fn pattern_span(self, _ row: u64) -> Span {
+        let at = self.cell(self.patterns_base, row, PATTERN_COLUMNS, PATTERN_START)
+        Span { start: self.word(at), len: self.word(at + 8) }
+    }
+
+    pub fn set_pattern_span(mut self, _ row: u64, _ span: Span) {
+        let at = self.cell(self.patterns_base, row, PATTERN_COLUMNS, PATTERN_START)
+        self.set_word(at, span.start)
+        self.set_word(at + 8, span.len)
+    }
+
+    fn file_get(self, _ row: u64, _ column: u64) -> u64 {
+        self.word(self.cell(self.files_base, row, FILE_COLUMNS, column))
+    }
+
+    fn file_set(mut self, _ row: u64, _ column: u64, _ value: u64) {
+        self.set_word(self.cell(self.files_base, row, FILE_COLUMNS, column), value)
+    }
+
+    fn file_span(self, _ row: u64, _ column: u64) -> Span {
+        Span { start: self.file_get(row, column), len: self.file_get(row, column + 1) }
+    }
+
+    fn set_file_span(mut self, _ row: u64, _ column: u64, _ span: Span) {
+        self.file_set(row, column, span.start)
+        self.file_set(row, column + 1, span.len)
+    }
+
+    fn entry_get(self, _ row: u64, _ column: u64) -> u64 {
+        self.word(self.cell(self.entries_base, row, ENTRY_COLUMNS, column))
+    }
+
+    fn entry_set(mut self, _ row: u64, _ column: u64, _ value: u64) {
+        self.set_word(self.cell(self.entries_base, row, ENTRY_COLUMNS, column), value)
+    }
+
+    fn entry_text(self, _ row: u64) -> Span {
+        Span { start: self.entry_get(row, ENTRY_TEXT_START), len: self.entry_get(row, ENTRY_TEXT_LEN) }
+    }
+
+    /// Start a failure message; append to it with `push_lit(mut news.data, ..)`
+    /// and close it with `end_message`.
+    pub fn begin_message(mut self) {
+        self.message = Span { start: self.data.len(), len: 0 }
+    }
+
+    pub fn end_message(mut self) -> Status {
+        self.message.len = self.data.len() - self.message.start
+        Status::Failed
+    }
+
+    /// Files are numbered in input order.
+    pub fn name(self, _ file: u64) -> Span {
+        self.file_span(file, NAME_START)
+    }
+
+    pub fn content(self, _ file: u64) -> Span {
+        self.file_span(file, CONTENT_START)
+    }
+
+    fn issue(self, _ file: u64) -> Span {
+        self.file_span(file, ISSUE_START)
+    }
+
+    /// Whether the file is a news fragment of a configured type.
+    pub fn is_news(self, _ file: u64) -> bool {
+        self.file_get(file, TYPE) != NONE
+    }
+
+    pub fn type_directory(self, _ index: u64) -> Span {
+        self.type_span(index, TYPE_DIRECTORY_START)
     }
 
     /// Copy a process argument into the data buffer and return its span.
@@ -126,84 +296,129 @@ impl News {
         Span { start, len: self.data.len() - start }
     }
 
-    /// Read all records from stdin.
+    /// Read all records from stdin, then index the files.
     pub fn read(mut self) -> Status uses (input: mut Read) {
+        let start = self.data.len()
         let mut kind = read_char()
         while kind >= 0 {
-            if read_char() != 32 {
-                return Status::MalformedInput
-            }
-            let mut len: u64 = 0
-            let mut c = read_char()
-            let mut digits: u64 = 0
-            while c >= 48 && c <= 57 && digits < 19 {
-                len = len * 10 + (c - 48).downcast_unchecked()
-                digits += 1
-                c = read_char()
-            }
-            if digits == 0 {
-                return Status::MalformedInput
-            }
-            if kind == 70 {
-                // 'F'
-                if c != 32 {
-                    return Status::MalformedInput
-                }
-                let name_start = self.data.len()
-                c = read_char()
-                while c >= 0 && c != 10 {
-                    push(mut self.data, c.downcast_unchecked())
-                    c = read_char()
-                }
-                if c != 10 {
-                    return Status::MalformedInput
-                }
-                let name_len = self.data.len() - name_start
-                let content = self.read_content(len)
-                if content.len == NO_TYPE {
-                    return Status::MalformedInput
-                }
-                let row = self.fragments.add_row()
-                self.fragments.set(row, NAME_START, name_start)
-                self.fragments.set(row, NAME_LEN, name_len)
-                self.fragments.set(row, CONTENT_START, content.start)
-                self.fragments.set(row, CONTENT_LEN, content.len)
-                self.fragments.set(row, TYPE, NO_TYPE)
-            } else if kind == 67 {
-                // 'C'
-                if c != 10 || self.has_changelog {
-                    return Status::MalformedInput
-                }
-                let content = self.read_content(len)
-                if content.len == NO_TYPE {
-                    return Status::MalformedInput
-                }
-                self.has_changelog = true
-                self.changelog = content
-            } else {
+            if !self.read_record(kind) {
                 return Status::MalformedInput
             }
             kind = read_char()
         }
+        self.records = Span { start, len: self.data.len() - start }
+        self.index_files()
         Status::Ok
     }
 
-    /// Read `len` bytes, normalizing `\r\n` and `\r` to `\n`. Returns a span
-    /// of length `NO_TYPE` if the input ends early.
-    fn read_content(mut self, _ len: u64) -> Span uses (input: mut Read) {
+    /// Read the record after its kind byte and store it as kind byte, name
+    /// length, name, content length and content.
+    fn read_record(mut self, _ kind: i32) -> bool uses (input: mut Read) {
+        if read_char() != 32 {
+            return false
+        }
+        let mut len: u64 = 0
+        let mut c = read_char()
+        let mut digits: u64 = 0
+        while c >= 48 && c <= 57 && digits < 19 {
+            len = len * 10 + (c - 48).downcast_unchecked()
+            digits += 1
+            c = read_char()
+        }
+        if digits == 0 || (kind != 67 && kind != 70 && kind != 83) {
+            return false
+        }
+        let header = self.data.len()
+        push(mut self.data, kind.downcast_unchecked())
+        self.push_word_placeholder()
+        let name_start = self.data.len()
+        if kind == 67 {
+            // 'C' has no name.
+            if c != 10 || self.has_changelog {
+                return false
+            }
+        } else {
+            if c != 32 {
+                return false
+            }
+            c = read_char()
+            while c >= 0 && c != 10 {
+                push(mut self.data, c.downcast_unchecked())
+                c = read_char()
+            }
+            if c != 10 {
+                return false
+            }
+        }
+        let name = Span { start: name_start, len: self.data.len() - name_start }
+        self.set_word(header + 1, name.len)
+        let content_header = self.data.len()
+        self.push_word_placeholder()
+        // The settings are TOML, which the parser checks byte for byte.
+        let content = self.read_content(len, kind != 83)
+        if content.len == NONE {
+            return false
+        }
+        self.set_word(content_header, content.len)
+        if kind == 67 {
+            self.has_changelog = true
+            self.changelog = content
+        } else if kind == 83 {
+            if self.has_settings {
+                return false
+            }
+            self.has_settings = true
+            self.settings = content
+            self.settings_name = name
+        } else {
+            self.file_count += 1
+        }
+        true
+    }
+
+    fn push_word_placeholder(mut self) {
+        let mut i: u64 = 0
+        while i < 8 {
+            push(mut self.data, 0)
+            i += 1
+        }
+    }
+
+    /// Reserve the file table and fill in names and contents from the records.
+    fn index_files(mut self) {
+        self.files_base = self.reserve(self.file_count, FILE_COLUMNS)
+        let mut at = self.records.start
+        let mut file: u64 = 0
+        while at < self.records.end() {
+            let kind = self.data.byte_at(at)
+            let name = Span { start: at + 9, len: self.word(at + 1) }
+            let content = Span { start: name.end() + 8, len: self.word(name.end()) }
+            if kind == RECORD_FILE {
+                self.set_file_span(file, NAME_START, name)
+                self.set_file_span(file, CONTENT_START, content)
+                self.file_set(file, TYPE, NONE)
+                file += 1
+            }
+            at = content.end()
+        }
+    }
+
+    /// Read `len` bytes, with `normalize` turning `\r\n` and `\r` into `\n`.
+    /// Returns a span of length `NONE` if the input ends early.
+    fn read_content(mut self, _ len: u64, _ normalize: bool) -> Span uses (input: mut Read) {
         let start = self.data.len()
         let mut after_cr = false
         let mut i: u64 = 0
         while i < len {
             let c = read_char()
             if c < 0 {
-                return Span { start, len: NO_TYPE }
+                return Span { start, len: NONE }
             }
-            if c == 13 {
+            if normalize && c == 13 {
                 push(mut self.data, 10)
                 after_cr = true
             } else {
-                if c != 10 || !after_cr {
+                if !normalize || c != 10 || !after_cr {
                     push(mut self.data, c.downcast_unchecked())
                 }
                 after_cr = false
@@ -213,42 +428,101 @@ impl News {
         Span { start, len: self.data.len() - start }
     }
 
-    /// Determine type, issue and counter of every fragment, derive their bullet
-    /// text and group them into entries.
+    /// Index of the fragment type whose directory is `span`, or `NONE`.
+    pub fn type_index(self, _ span: Span) -> u64 {
+        let mut i: u64 = 0
+        while i < self.type_count {
+            if spans_eq(self.data, self.type_directory(i), span) {
+                return i
+            }
+            i += 1
+        }
+        NONE
+    }
+
+    /// Whether a file of the fragment directory is never a fragment.
+    pub fn is_ignored(self, _ name: Span) -> bool {
+        if span_eq_lit_lower(self.data, name, ".gitignore")
+            || span_eq_lit_lower(self.data, name, ".gitkeep")
+            || span_eq_lit_lower(self.data, name, ".keep")
+            || span_eq_lit_lower(self.data, name, "readme")
+            || span_eq_lit_lower(self.data, name, "readme.md")
+            || span_eq_lit_lower(self.data, name, "readme.rst")
+        {
+            return true
+        }
+        let mut i: u64 = 0
+        while i < self.pattern_count {
+            let pattern = self.pattern_span(i)
+            if ingot::glob::matches_lower(self.data, pattern, name) {
+                return true
+            }
+            i += 1
+        }
+        false
+    }
+
+    /// Determine type, issue and counter of every file, derive the bullet
+    /// texts and group the fragments into entries.
     pub fn collect(mut self) -> Status {
-        let mut orphans: [u64; 7] = [0; 7]
-        let count = self.fragments.rows()
+        // Orphan counters per type, then at most one entry per file.
+        let orphans = self.reserve(self.type_count, 1)
+        self.entries_base = self.reserve(self.file_count, ENTRY_COLUMNS)
         let mut f: u64 = 0
-        while f < count {
-            self.parse_name(f)
-            let kind = self.fragments.get(f, TYPE)
-            if kind != NO_TYPE {
-                let issue = self.issue(f)
-                if issue.len > 0 && self.data.byte_at(issue.start) == ORPHAN_PREFIX {
-                    self.fragments.set(f, ISSUE_LEN, 0)
-                    self.fragments.set(f, COUNTER, orphans[kind as usize])
-                    orphans[kind as usize] += 1
-                }
-                if self.find_duplicate(f) {
-                    self.duplicate = f
-                    return Status::DuplicateFragment
-                }
-                self.derive_text(f)
-                self.assign_entry(f)
+        while f < self.file_count {
+            let status = self.collect_file(f, orphans)
+            if !status.is_ok() {
+                return status
             }
             f += 1
         }
         Status::Ok
     }
 
+    fn collect_file(mut self, _ f: u64, _ orphans: u64) -> Status {
+        let name = self.name(f)
+        if self.is_ignored(name) {
+            return Status::Ok
+        }
+        self.parse_name(f)
+        let kind = self.file_get(f, TYPE)
+        if kind == NONE {
+            if !self.strict {
+                return Status::Ok
+            }
+            self.begin_message()
+            push_lit(mut self.data, "Invalid news fragment name: ")
+            push_own_span(mut self.data, name)
+            return self.end_message()
+        }
+        let issue = self.issue(f)
+        if self.orphan_prefix.len > 0 && self.has_prefix(issue, self.orphan_prefix) {
+            let counter = orphans + kind * 8
+            self.file_set(f, ISSUE_LEN, 0)
+            self.file_set(f, COUNTER, self.word(counter))
+            self.set_word(counter, self.word(counter) + 1)
+        }
+        if self.find_duplicate(f) {
+            self.begin_message()
+            push_lit(mut self.data, "multiple fragments for the ")
+            push_lit(mut self.data, "same issue, type and counter: ")
+            push_own_span(mut self.data, name)
+            return self.end_message()
+        }
+        self.derive_text(f)
+        self.assign_entry(f)
+        Status::Ok
+    }
+
+    fn has_prefix(self, _ span: Span, _ prefix: Span) -> bool {
+        span.len >= prefix.len && spans_eq(self.data, Span { start: span.start, len: prefix.len }, prefix)
+    }
+
     /// Parse `<issue>.<type>[.<counter>][.<anything>]` like towncrier: the type
     /// is the last dot-separated part (after the first) that names a configured
     /// type, everything before it is the issue.
-    fn parse_name(mut self, _ f: u64) {
+    pub fn parse_name(mut self, _ f: u64) {
         let name = self.name(f)
-        if is_ignored(self.data, name) {
-            return
-        }
         // Walk the parts from the back. `end` is the end of the current part.
         let mut end = name.end()
         let mut next_part = Span { start: name.end(), len: 0 }
@@ -258,17 +532,16 @@ impl News {
             pos -= 1
             if self.data.byte_at(pos) == 46 {
                 let part = Span { start: pos + 1, len: end - pos - 1 }
-                let kind = type_index(self.data, part)
-                if kind != NO_TYPE {
+                let kind = self.type_index(part)
+                if kind != NONE {
                     let issue = normalize_issue(self.data, strip(self.data, Span { start: name.start, len: pos - name.start }))
                     let mut counter: u64 = 0
                     if has_next && all_digits(self.data, next_part) {
                         counter = parse_counter(self.data, next_part)
                     }
-                    self.fragments.set(f, TYPE, kind)
-                    self.fragments.set(f, ISSUE_START, issue.start)
-                    self.fragments.set(f, ISSUE_LEN, issue.len)
-                    self.fragments.set(f, COUNTER, counter)
+                    self.file_set(f, TYPE, kind)
+                    self.set_file_span(f, ISSUE_START, issue)
+                    self.file_set(f, COUNTER, counter)
                     return
                 }
                 next_part = part
@@ -279,12 +552,12 @@ impl News {
     }
 
     fn find_duplicate(self, _ f: u64) -> bool {
-        let kind = self.fragments.get(f, TYPE)
-        let counter = self.fragments.get(f, COUNTER)
+        let kind = self.file_get(f, TYPE)
+        let counter = self.file_get(f, COUNTER)
         let mut g: u64 = 0
         while g < f {
-            if self.fragments.get(g, TYPE) == kind
-                && self.fragments.get(g, COUNTER) == counter
+            if self.file_get(g, TYPE) == kind
+                && self.file_get(g, COUNTER) == counter
                 && spans_eq(self.data, self.issue(g), self.issue(f))
             {
                 return true
@@ -299,8 +572,8 @@ impl News {
     /// fragments with an issue.
     fn derive_text(mut self, _ f: u64) {
         let start = self.data.len()
-        let kind = self.fragments.get(f, TYPE)
-        if shows_content(kind) || self.issue(f).len == 0 {
+        let kind = self.file_get(f, TYPE)
+        if self.type_get(kind, TYPE_SHOWS_CONTENT) == 1 || self.issue(f).len == 0 {
             let content = strip(self.data, self.content(f))
             let mut line_start = content.start
             while line_start < content.end() {
@@ -319,34 +592,33 @@ impl News {
                 line_start = line_end
             }
         }
-        self.fragments.set(f, TEXT_START, start)
-        self.fragments.set(f, TEXT_LEN, self.data.len() - start)
+        self.set_file_span(f, TEXT_START, Span { start, len: self.data.len() - start })
     }
 
     fn assign_entry(mut self, _ f: u64) {
-        let kind = self.fragments.get(f, TYPE)
-        let text = self.text(f)
+        let kind = self.file_get(f, TYPE)
+        let text = self.file_span(f, TEXT_START)
         let mut e: u64 = 0
-        while e < self.entries.rows() {
-            if self.entries.get(e, ENTRY_TYPE) == kind && spans_eq(self.data, self.entry_text(e), text) {
-                self.fragments.set(f, ENTRY, e)
+        while e < self.entry_count {
+            if self.entry_get(e, ENTRY_TYPE) == kind && spans_eq(self.data, self.entry_text(e), text) {
+                self.file_set(f, ENTRY, e)
                 return
             }
             e += 1
         }
-        e = self.entries.add_row()
-        self.entries.set(e, ENTRY_TYPE, kind)
-        self.entries.set(e, ENTRY_TEXT_START, text.start)
-        self.entries.set(e, ENTRY_TEXT_LEN, text.len)
-        self.fragments.set(f, ENTRY, e)
+        self.entry_count += 1
+        self.entry_set(e, ENTRY_TYPE, kind)
+        self.entry_set(e, ENTRY_TEXT_START, text.start)
+        self.entry_set(e, ENTRY_TEXT_LEN, text.len)
+        self.file_set(f, ENTRY, e)
     }
 
     /// Fragments of `entry` that have an issue, ordered by issue.
     fn entry_issues(self, _ entry: u64) -> Table {
         let mut issues = Table::new(1)
         let mut f: u64 = 0
-        while f < self.fragments.rows() {
-            if self.is_news(f) && self.fragments.get(f, ENTRY) == entry && self.issue(f).len > 0 {
+        while f < self.file_count {
+            if self.is_news(f) && self.file_get(f, ENTRY) == entry && self.issue(f).len > 0 {
                 // Insertion sort by (issue key, issue).
                 issues.push(f)
                 let mut i = issues.rows() - 1
@@ -369,9 +641,7 @@ impl News {
         let x_digits = first_digit_run(self.data, x)
         let y_digits = first_digit_run(self.data, y)
         // Issues without digits sort first, then mixed ones, digit-only ones last.
-        let x_class = issue_class(x, x_digits)
-        let y_class = issue_class(y, y_digits)
-        let mut order = compare_u64(x_class, y_class)
+        let mut order = compare_u64(issue_class(x, x_digits), issue_class(y, y_digits))
         if order == 0 {
             order = compare_without(self.data, x, x_digits, y, y_digits)
         }
@@ -387,8 +657,8 @@ impl News {
     /// Order entries like towncrier: entries with issues before orphan entries,
     /// those by their issues, orphans by their text.
     fn compare_entries(self, _ a: u64, _ b: u64) -> i32 {
-        let mut a_issues = self.entry_issues(a)
-        let mut b_issues = self.entry_issues(b)
+        let a_issues = self.entry_issues(a)
+        let b_issues = self.entry_issues(b)
         let empty = Span { start: 0, len: 0 }
         let a_key = if a_issues.rows() == 0 { self.entry_text(a) } else { empty }
         let b_key = if b_issues.rows() == 0 { self.entry_text(b) } else { empty }
@@ -410,8 +680,8 @@ impl News {
     fn sorted_entries(self, _ kind: u64) -> Table {
         let mut sorted = Table::new(1)
         let mut e: u64 = 0
-        while e < self.entries.rows() {
-            if self.entries.get(e, ENTRY_TYPE) == kind {
+        while e < self.entry_count {
+            if self.entry_get(e, ENTRY_TYPE) == kind {
                 // Stable insertion sort.
                 sorted.push(e)
                 let mut i = sorted.rows() - 1
@@ -426,15 +696,31 @@ impl News {
         sorted
     }
 
-    /// Append the release notes for `version`: the title and all sections.
+    /// Append the release notes as towncrier writes them: the formatted
+    /// `title_format` (if any) and the rendered template.
     pub fn render(self, _ out: mut ByteBuffer, version: Span, date: Span) {
-        push_title(mut out, self.data, version, date)
-        push_lit(mut out, "\n\n")
-        if self.entries.rows() == 0 {
+        if self.title_mode == TITLE_FORMAT {
+            self.push_title(mut out, version, date)
+            push_lit(mut out, "\n")
+        }
+        if self.title_mode == TITLE_DEFAULT {
+            push_hashes(mut out, self.header_level)
+            push_lit(mut out, " ")
+            if self.project_name.len > 0 {
+                push_span(mut out, self.data, self.project_name)
+                push_lit(mut out, " ")
+            }
+            push_span(mut out, self.data, version)
+            push_lit(mut out, " (")
+            push_span(mut out, self.data, date)
+            push_lit(mut out, ")\n")
+        }
+        push_lit(mut out, "\n")
+        if self.entry_count == 0 {
             push_lit(mut out, "No significant changes.\n\n")
         }
         let mut kind: u64 = 0
-        while kind < TYPE_COUNT {
+        while kind < self.type_count {
             self.render_section(mut out, kind)
             kind += 1
         }
@@ -444,8 +730,9 @@ impl News {
     fn render_section(self, _ out: mut ByteBuffer, _ kind: u64) {
         let sorted = self.sorted_entries(kind)
         if sorted.rows() > 0 {
-            push_lit(mut out, "### ")
-            push_type_name(mut out, kind)
+            push_hashes(mut out, self.header_level + 1)
+            push_lit(mut out, " ")
+            push_span(mut out, self.data, self.type_span(kind, TYPE_NAME_START))
             push_lit(mut out, "\n\n")
             let mut i: u64 = 0
             while i < sorted.rows() {
@@ -459,7 +746,7 @@ impl News {
 
     fn render_entry(self, _ out: mut ByteBuffer, _ entry: u64) {
         let text = self.entry_text(entry)
-        let mut issues = self.entry_issues(entry)
+        let issues = self.entry_issues(entry)
         let has_issues = issues.rows() > 0
         if text.len > 0 || has_issues {
             push_lit(mut out, "- ")
@@ -477,7 +764,7 @@ impl News {
                     if i > 0 {
                         push_lit(mut out, ", ")
                     }
-                    push_issue_link(mut out, self.data, self.issue(issues.get(i, 0)))
+                    self.push_issue(mut out, self.issue(issues.get(i, 0)))
                     i += 1
                 }
                 if text.len > 0 {
@@ -490,57 +777,71 @@ impl News {
     }
 
     /// Append the changelog with the release notes inserted behind the start
-    /// marker, like `towncrier build` writes it.
+    /// string, like `towncrier build` writes it. `out` must be empty.
     pub fn render_changelog(self, _ out: mut ByteBuffer, version: Span, date: Span) -> Status {
-        let mut notes = ByteBuffer::new()
-        self.render(mut notes, version, date)
-        let mut title_len: u64 = 0
-        while notes.byte_at(title_len) != 10 {
-            title_len += 1
-        }
-        let title = Span { start: 0, len: title_len }
-        let mut marker = ByteBuffer::new()
-        push_start_string(mut marker)
-        let marker_span = Span { start: 0, len: marker.len() }
-
-        let mut previous = Span { start: 0, len: 0 }
-        if self.has_changelog {
-            let at = find_in(self.data, self.changelog, marker, marker_span)
-            if at < self.changelog.len {
-                push_span(mut out, self.data, rstrip(self.data, Span { start: self.changelog.start, len: at }))
-                push_lit(mut out, "\n\n")
-                push_span(mut out, marker, marker_span)
-                push_lit(mut out, "\n")
-                let rest = at + marker.len()
-                previous = lstrip(self.data, Span { start: self.changelog.start + rest, len: self.changelog.len - rest })
-            } else {
-                previous = lstrip(self.data, self.changelog)
+        let previous = self.previous_notes()
+        // A formatted title that already occurs means the release exists.
+        if self.title_mode == TITLE_FORMAT {
+            self.push_title(mut out, version, date)
+            let title = Span { start: 0, len: out.len() }
+            let released = find_in(self.data, previous, out, title) < previous.len
+            out.clear()
+            if released {
+                return Status::AlreadyReleased
             }
         }
-        let mut status = Status::Ok
-        if find_in(self.data, previous, notes, title) < previous.len {
-            status = Status::AlreadyReleased
-        } else if previous.len > 0 {
-            push_span(mut out, notes, Span { start: 0, len: notes.len() })
-            push_span(mut out, self.data, previous)
-        } else {
-            push_span(mut out, notes, rstrip(notes, Span { start: 0, len: notes.len() }))
+        let marker = self.marker_offset()
+        if marker != NONE {
+            push_span(mut out, self.data, rstrip(self.data, Span { start: self.changelog.start, len: marker }))
+            push_lit(mut out, "\n\n")
+            push_span(mut out, self.data, self.start_string)
             push_lit(mut out, "\n")
         }
-        notes.release()
-        marker.release()
-        status
+        let notes_start = out.len()
+        self.render(mut out, version, date)
+        if previous.len > 0 {
+            push_span(mut out, self.data, previous)
+        } else {
+            // Without earlier notes the file ends right after the new ones.
+            let mut end = out.len()
+            while end > notes_start && ingot::buf::is_space(out.byte_at(end - 1)) {
+                end -= 1
+            }
+            core::assert(out.try_resize(end))
+            push_lit(mut out, "\n")
+        }
+        Status::Ok
+    }
+
+    /// Offset of the start string in the changelog, or `NONE`.
+    fn marker_offset(self) -> u64 {
+        if !self.has_changelog {
+            return NONE
+        }
+        let at = find_in(self.data, self.changelog, self.data, self.start_string)
+        if at == self.changelog.len { NONE } else { at }
+    }
+
+    /// The part of the changelog after the start string (or all of it).
+    fn previous_notes(self) -> Span {
+        if !self.has_changelog {
+            return Span { start: 0, len: 0 }
+        }
+        let marker = self.marker_offset()
+        if marker == NONE {
+            return lstrip(self.data, self.changelog)
+        }
+        let rest = marker + self.start_string.len
+        lstrip(self.data, Span { start: self.changelog.start + rest, len: self.changelog.len - rest })
     }
 }
 
-/// Names that towncrier never treats as fragments.
-fn is_ignored(_ buf: ByteBuffer, _ name: Span) -> bool {
-    span_eq_lit_lower(buf, name, ".gitignore")
-        || span_eq_lit_lower(buf, name, ".gitkeep")
-        || span_eq_lit_lower(buf, name, ".keep")
-        || span_eq_lit_lower(buf, name, "readme")
-        || span_eq_lit_lower(buf, name, "readme.md")
-        || span_eq_lit_lower(buf, name, "readme.rst")
+fn push_hashes(_ out: mut ByteBuffer, _ count: u64) {
+    let mut i: u64 = 0
+    while i < count {
+        push(mut out, 35)
+        i += 1
+    }
 }
 
 /// Drop leading zeros of a numeric issue, keeping a single `0`.

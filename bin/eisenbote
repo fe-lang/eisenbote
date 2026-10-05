@@ -1,53 +1,57 @@
 #!/bin/sh
-# crier: assemble release notes from news fragments, like towncrier.
+# eisenbote: assemble release notes from news fragments, like towncrier.
 #
-# All logic lives in the native Fe executable `crier-bin` (built from src/).
-# Fe programs can't open files yet, so this script feeds it the fragment
-# directory (and the changelog) on stdin and writes its output back.
+# All logic lives in the native Fe executable `eisenbote` (built from
+# ingots/eisenbote). Fe programs can't open files yet, so this script feeds
+# it the settings, the fragment directory and the changelog on stdin and
+# writes its output back.
 set -eu
 
 usage() {
-    cat >&2 <<'EOF'
-usage: crier draft --version <version> [--date <date>]
-       crier build --version <version> [--date <date>] [--yes | --keep]
-       crier check [--empty]
+    cat >&2 <<'EOF2'
+usage: eisenbote draft [--version <version>] [--date <date>]
+       eisenbote build [--version <version>] [--date <date>] [--yes | --keep]
+       eisenbote check [--empty]
 
 Options:
-  --dir <dir>     fragment directory (default: newsfragments)
-  --file <file>   changelog (default: CHANGELOG.md)
-  --date <date>   release date (default: today, YYYY-MM-DD)
-  --yes           remove the consumed fragments without asking
-  --keep          keep the consumed fragments
+  --config <file>  settings (default: the first of eisenbote.toml,
+                   towncrier.toml and pyproject.toml in the current directory)
+  --version <v>    release version (default: the `version` setting)
+  --date <date>    release date (default: today, YYYY-MM-DD)
+  --yes            remove the consumed fragments without asking
+  --keep           keep the consumed fragments
 
 draft   print the release notes for the pending fragments
 build   insert the release notes into the changelog, stage it and remove
         the consumed fragments with git
-check   reject files in the fragment directory that are not valid fragments;
-        with --empty, reject any fragment (used before tagging a release)
-EOF
+check   reject files in the fragment directory that are not fragments of a
+        configured type; with --empty, reject any fragment (used before
+        tagging a release)
+
+eisenbote.toml takes towncrier's settings at the top level; towncrier.toml
+and pyproject.toml take them from [tool.towncrier].
+EOF2
     exit 2
 }
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-bin=${CRIER_BIN:-$here/../out/crier}
+bin=${EISENBOTE_BIN:-$here/../out/eisenbote}
 if [ ! -x "$bin" ]; then
-    echo "crier: executable not found at $bin (run make, or set CRIER_BIN)" >&2
+    echo "eisenbote: executable not found at $bin (run make, or set EISENBOTE_BIN)" >&2
     exit 2
 fi
 
 [ $# -ge 1 ] || usage
 command=$1
 shift
-dir=newsfragments
-file=CHANGELOG.md
+config=
 version=
 date=
 answer=ask
 empty=no
 while [ $# -gt 0 ]; do
     case $1 in
-        --dir) [ $# -ge 2 ] || usage; dir=$2; shift 2 ;;
-        --file) [ $# -ge 2 ] || usage; file=$2; shift 2 ;;
+        --config) [ $# -ge 2 ] || usage; config=$2; shift 2 ;;
         --version) [ $# -ge 2 ] || usage; version=$2; shift 2 ;;
         --date) [ $# -ge 2 ] || usage; date=$2; shift 2 ;;
         --yes) answer=yes; shift ;;
@@ -57,27 +61,26 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -n "$date" ] || date=$(date +%Y-%m-%d)
-
-# Write one record per regular file of the fragment directory, in byte order
-# of their names so that the output doesn't depend on the file system.
-fragments() {
-    [ -d "$dir" ] || return 0
-    LC_ALL=C ls -A -- "$dir" | while IFS= read -r name; do
-        path=$dir/$name
-        [ -f "$path" ] || continue
-        printf 'F %s %s\n' "$(($(wc -c < "$path")))" "$name"
-        cat -- "$path"
+if [ -z "$config" ]; then
+    for candidate in eisenbote.toml towncrier.toml pyproject.toml; do
+        if [ -f "$candidate" ]; then
+            config=$candidate
+            break
+        fi
     done
+fi
+if [ -z "$config" ] || [ ! -f "$config" ]; then
+    echo "eisenbote: no settings found (eisenbote.toml, towncrier.toml or pyproject.toml)" >&2
+    exit 2
+fi
+
+settings() {
+    printf 'S %s %s\n' "$(($(wc -c < "$config")))" "${config##*/}"
+    cat -- "$config"
 }
 
-changelog() {
-    [ -f "$file" ] || return 0
-    printf 'C %s\n' "$(($(wc -c < "$file")))"
-    cat -- "$file"
-}
-
-# Run crier-bin with the given input producer; on failure its output is the
-# error message.
+# Run the executable with the given input producer; on failure its output
+# is the error message.
 run() {
     producer=$1
     shift
@@ -87,24 +90,49 @@ run() {
         rm -f "$out"
     else
         status=$?
-        sed 's/^/crier: /' "$out" >&2
+        sed 's/^/eisenbote: /' "$out" >&2
         rm -f "$out"
         exit "$status"
     fi
 }
 
+# The fragment directory and the changelog, relative to the settings file.
+paths=$(run settings paths)
+base=$(dirname -- "$config")
+relative() {
+    case $1 in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$base" "$1" ;;
+    esac
+}
+dir=$(relative "$(printf '%s\n' "$paths" | sed -n 1p)")
+file=$(relative "$(printf '%s\n' "$paths" | sed -n 2p)")
+
+# One record per regular file of the fragment directory, in byte order of
+# their names so that the output doesn't depend on the file system.
+fragments() {
+    settings
+    [ -d "$dir" ] || return 0
+    LC_ALL=C ls -A -- "$dir" | while IFS= read -r name; do
+        path=$dir/$name
+        [ -f "$path" ] || continue
+        printf 'F %s %s\n' "$(($(wc -c < "$path")))" "$name"
+        cat -- "$path"
+    done
+}
+
 with_changelog() {
     fragments
-    changelog
+    [ -f "$file" ] || return 0
+    printf 'C %s\n' "$(($(wc -c < "$file")))"
+    cat -- "$file"
 }
 
 case $command in
     draft)
-        [ -n "$version" ] || usage
         run fragments draft "$version" "$date"
         ;;
     build)
-        [ -n "$version" ] || usage
         consumed=$(run fragments list)
         notes=$(mktemp)
         # Keep the trailing newlines that $(...) would strip.
