@@ -10,8 +10,8 @@ For markdown changelogs eisenbote produces the same bytes as towncrier 25.8.
 The test suite checks this on a range of edge cases and settings, and by
 replaying all 38 Fe releases since 2021.
 
-The settings are read with [lutz](../lutz), a TOML 1.0 parser in Fe, which
-is expected next to this repository (`../lutz`).
+The settings are read with [lutz](https://github.com/fe-lang/lutz), a TOML
+1.0 parser in Fe, which Fe fetches as a GitHub dependency.
 
 ## Usage
 
@@ -91,11 +91,38 @@ Linux or AArch64 macOS:
 ```sh
 make FE=/path/to/fe            # builds out/eisenbote
 make test FE=/path/to/fe       # Fe unit tests and tests/test_eisenbote.py
+make download                  # or fetch the last working executable
 ```
 
 `tests/test_eisenbote.py` compares against towncrier when it is installed,
 and replays the Fe history when `FE_REPO` points at a clone of the Fe
 repository.
+
+### Keeping up with Fe
+
+Fe changes quickly, and eisenbote has to keep building with it. The
+[Latest Fe](.github/workflows/latest-fe.yml) workflow builds and tests
+eisenbote with Fe's current master every day (and on every push and pull
+request), so a breaking change shows up within a day rather than on a release
+day. When it passes on master, its executables replace the assets of the
+`last-working` release, and `make download` fetches the one for the current
+platform.
+
+### In the Fe repository
+
+The Fe release process builds eisenbote with the compiler that is about to be
+released, which also checks that its native backend works on a real program.
+If that build fails, it falls back to the last working executable:
+
+```sh
+cargo build --release -p fe --features cranelift
+make -C ../eisenbote -B FE=$PWD/target/release/fe || make -C ../eisenbote download
+../eisenbote/bin/eisenbote build --yes --version X
+```
+
+Fe's CI only validates fragment names, so it uses `make download`. Since the
+settings stay in towncrier's format, `towncrier build` keeps working as a last
+resort.
 
 ## Design
 

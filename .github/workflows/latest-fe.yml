@@ -1,0 +1,103 @@
+# Build and test eisenbote with Fe's latest master every day, so that a change
+# in Fe that breaks eisenbote shows up long before a release. When everything
+# passes on master, the executables become the `last-working` release, which
+# `make download` fetches.
+name: Latest Fe
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: x86_64-linux
+          - os: macos-latest
+            platform: arm64-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Check out Fe master
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: argotorg/fe
+          ref: master
+          path: fe
+          # The tests replay Fe's past releases.
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Generate tree-sitter parser
+        working-directory: fe/crates/tree-sitter-fe
+        run: |
+          npm ci --ignore-scripts
+          npm rebuild tree-sitter-cli
+          npx tree-sitter generate --abi=14
+      - name: Cache Fe build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fe
+      - name: Build Fe
+        run: cargo build --release -p fe --features cranelift --manifest-path fe/Cargo.toml
+      - name: Build eisenbote
+        run: make FE="$PWD/fe/target/release/fe"
+      - name: Test eisenbote
+        env:
+          FE_REPO: ${{ github.workspace }}/fe
+        run: |
+          python3 -m pip install --user towncrier==25.8.0
+          make test FE="$PWD/fe/target/release/fe"
+      - name: Record the Fe commit
+        run: git -C fe rev-parse HEAD > out/fe-commit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eisenbote-${{ matrix.platform }}
+          path: |
+            out/eisenbote
+            out/fe-commit
+
+  publish:
+    # Only builds from this repository's master (pushes, the daily run and
+    # manual runs) replace the last working executables.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Update the last-working release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Asset names match `make download`: eisenbote-$(uname -m)-$(uname -s).
+          mkdir assets
+          for platform in x86_64-linux arm64-darwin; do
+            cp "eisenbote-$platform/eisenbote" "assets/eisenbote-$platform"
+          done
+          fe_commit=$(cat eisenbote-x86_64-linux/fe-commit)
+          notes="Built and tested with argotorg/fe@$fe_commit and eisenbote@$GITHUB_SHA."
+          if ! gh release view last-working > /dev/null 2>&1; then
+            gh release create last-working --title "Last working build" --notes "$notes" --prerelease
+          fi
+          gh release upload last-working assets/* --clobber
+          gh release edit last-working --notes "$notes"
