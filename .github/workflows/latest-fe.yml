@@ -59,12 +59,18 @@ jobs:
         run: cargo build --release -p fe --features cranelift --manifest-path fe/Cargo.toml
       - name: Build eisenbote
         run: make FE="$PWD/fe/target/release/fe"
-      - name: Test eisenbote
+      - name: Install towncrier
+        # A virtual environment, since the runners' Pythons are externally managed.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install towncrier==25.8.0
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      - name: Fe unit tests
+        run: fe/target/release/fe test --backend native .
+      - name: Compare with towncrier
         env:
           FE_REPO: ${{ github.workspace }}/fe
-        run: |
-          python3 -m pip install --user towncrier==25.8.0
-          make test FE="$PWD/fe/target/release/fe"
+        run: python3 tests/test_eisenbote.py
       - name: Record the Fe commit
         run: git -C fe rev-parse HEAD > out/fe-commit
       - uses: actions/upload-artifact@v4
