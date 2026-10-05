@@ -115,7 +115,7 @@ impl News {
         self.fragments.get(fragment, TYPE) != NO_TYPE
     }
 
-    /// Copy `text` into the data buffer and return its span.
+    /// Copy a process argument into the data buffer and return its span.
     pub fn intern_arg(mut self, _ arg: std::native::Arg) -> Span {
         let start = self.data.len()
         let mut i: usize = 0
