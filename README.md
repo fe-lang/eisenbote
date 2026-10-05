@@ -96,5 +96,7 @@ once they are merged:
   raw byte writes through a `mut` buffer parameter, for example a buffer
   released in a loop. crier moves such loop bodies into helper functions and
   copies the process arguments before borrowing its state mutably.
-- Borrow checking performance: compiling crier takes minutes, almost all of
-  it in a few functions with several loops.
+- `perf/borrowck-reuse-overwrite-replacements`: borrow checking crier takes
+  over a minute, almost all of it in a few functions with nested loops around
+  effect calls. The branch reuses work across fixed-point sweeps (about 20%
+  faster); the rest needs a different representation of the solver's guards.
