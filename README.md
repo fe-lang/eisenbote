@@ -77,18 +77,24 @@ Differences from towncrier:
 
 ## Fe compiler issues found while writing crier
 
-Writing crier ran into several compiler bugs. Each has a branch with a fix,
-tests and a newsfragment in the Fe repository. The workarounds in this
-repository can go once those are merged:
+Writing crier ran into several compiler bugs. Each one got a branch in the Fe
+repository with a fix, tests and a newsfragment. The workarounds here can go
+once they are merged:
 
-- `fix/diagnostics-color-choice`: `--color never` was ignored for diagnostics.
-- `fix/runtime-as-bytes`: `AsBytes::as_bytes` failed in codegen for values
-  that aren't literals at the call site. crier uses its own `Literal` trait
-  over `String::as_bytes` instead.
+- `fix/diagnostics-color-choice`: diagnostics ignored `--color never` and
+  were colored even when piped.
+- `fix/runtime-as-bytes`: `AsBytes::as_bytes` failed in codegen when the value
+  wasn't a literal at the call site, for example a tuple of strings or any
+  string passed through a generic helper. crier uses its own `Literal` trait
+  over `String::as_bytes` and splits long literals instead of using tuples.
 - `fix/string-literal-const-generic-inference`: a string literal couldn't
   infer `N` of a `String<N>` or `[u8; N]` parameter.
+- `fix/tuple-assoc-const-array-len`: array lengths given by an associated
+  const, such as `const X: [u8; 3] = ("a", "bc").as_bytes()`, were rejected
+  while the string literals' types were still open.
 - `fix/loop-fresh-buffer-move-conflict`: false move and borrow conflicts after
   raw byte writes through a `mut` buffer parameter, for example a buffer
-  released in a loop. crier moves such loop bodies into helper functions
-  and copies the process arguments before borrowing its state mutably.
-- A borrow checking performance problem: compiling crier takes minutes.
+  released in a loop. crier moves such loop bodies into helper functions and
+  copies the process arguments before borrowing its state mutably.
+- Borrow checking performance: compiling crier takes minutes, almost all of
+  it in a few functions with several loops.
