@@ -8,6 +8,8 @@ RELEASE_URL ?= https://github.com/fe-lang/eisenbote/releases/download/last-worki
 PLATFORM = $(shell uname -m)-$(shell uname -s | tr A-Z a-z)
 
 out/eisenbote: $(SOURCES)
+	@echo "Compiling eisenbote. fe prints nothing until it is done, which takes"
+	@echo "several minutes. (\`make download\` fetches the last working executable.)"
 	$(FE) build --backend native --ingot eisenbote --out-dir out .
 
 # Download the last working executable instead of building one.
