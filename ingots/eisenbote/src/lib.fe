@@ -21,12 +21,12 @@ use std::io::{Read, Write, host, write_char}
 use std::native::{Args, ByteBuffer}
 
 pub fn main(argc: i32, argv: **u8) -> i32 {
-    let args = Args::new(argc, argv)
-    let mut news = News::new()
-    let mut out = ByteBuffer::new()
+    let args = unsafe { Args::new(argc, argv) }
+    var news = News::new()
+    var out = ByteBuffer::new()
     // Copy the arguments so that only `news` is borrowed from here on.
-    let mut words = Table::new(2)
-    let mut i: usize = 1
+    var words = Table::new(2)
+    var i: usize = 1
     while i < args.len() {
         let span = news.intern_arg(args.get(i))
         words.push(span.start)
@@ -35,7 +35,7 @@ pub fn main(argc: i32, argv: **u8) -> i32 {
     }
     let code = with (Read = host(), Write = host()) {
         let code = run(words, mut news, mut out)
-        let mut j: u64 = 0
+        var j: u64 = 0
         while j < out.len() {
             write_char(out.byte_at(j) as i32)
             j += 1
@@ -79,7 +79,7 @@ fn parse_command(_ words: Table, _ news: News) -> u64 {
         return USAGE
     }
     let name = word(words, 0)
-    let mut command = USAGE
+    var command = USAGE
     if span_eq_lit(news.data, name, "paths") {
         command = PATHS
     } else if span_eq_lit(news.data, name, "draft") {
@@ -132,7 +132,7 @@ fn paths(_ news: News, _ out: mut ByteBuffer) -> i32 {
 }
 
 fn list(_ news: News, _ out: mut ByteBuffer) -> i32 {
-    let mut f: u64 = 0
+    var f: u64 = 0
     while f < news.file_count {
         if news.is_news(f) {
             push_span(mut out, news.data, news.name(f))
@@ -144,7 +144,7 @@ fn list(_ news: News, _ out: mut ByteBuffer) -> i32 {
 }
 
 fn release_notes(_ draft: bool, _ words: Table, _ news: mut News, _ out: mut ByteBuffer) -> i32 {
-    let mut version = word(words, 1)
+    var version = word(words, 1)
     if version.len == 0 {
         version = news.version
     }

@@ -10,7 +10,7 @@ fn text(_ buf: ByteBuffer) -> Span {
 
 #[test]
 fn strip_removes_ascii_whitespace() {
-    let mut buf = ByteBuffer::new()
+    var buf = ByteBuffer::new()
     push_lit(mut buf, " \t\n x y \r\n")
     let all = text(buf)
     let stripped = strip(buf, all)
@@ -24,7 +24,7 @@ fn strip_removes_ascii_whitespace() {
 
 #[test]
 fn literals_compare_exactly_or_ignoring_case() {
-    let mut buf = ByteBuffer::new()
+    var buf = ByteBuffer::new()
     push_lit(mut buf, "ReadMe.MD")
     let name = text(buf)
     core::assert(!span_eq_lit(buf, name, "readme.md"))
@@ -36,7 +36,7 @@ fn literals_compare_exactly_or_ignoring_case() {
 
 #[test]
 fn spans_order_bytewise_then_by_length() {
-    let mut buf = ByteBuffer::new()
+    var buf = ByteBuffer::new()
     push_lit(mut buf, "abcab")
     let abc = Span { start: 0, len: 3 }
     let ab = Span { start: 3, len: 2 }
@@ -50,9 +50,9 @@ fn spans_order_bytewise_then_by_length() {
 
 #[test]
 fn find_reports_first_match_or_haystack_length() {
-    let mut hay = ByteBuffer::new()
+    var hay = ByteBuffer::new()
     push_lit(mut hay, "one marker two marker")
-    let mut needle = ByteBuffer::new()
+    var needle = ByteBuffer::new()
     push_lit(mut needle, "marker")
     let all = text(hay)
     let marker = text(needle)
@@ -65,7 +65,7 @@ fn find_reports_first_match_or_haystack_length() {
 
 #[test]
 fn table_cells_round_trip() {
-    let mut table = Table::new(3)
+    var table = Table::new(3)
     core::assert(table.rows() == 0)
     let row = table.add_row()
     table.set(row, 0, 0xffffffffffffffff)

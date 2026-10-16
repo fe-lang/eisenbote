@@ -5,11 +5,11 @@ use std::native::ByteBuffer
 
 /// Whether `name`, in ASCII lower case, matches `pattern` (both spans of `buf`).
 pub fn matches_lower(_ buf: ByteBuffer, _ pattern: Span, _ name: Span) -> bool {
-    let mut p: u64 = 0
-    let mut n: u64 = 0
+    var p: u64 = 0
+    var n: u64 = 0
     // Where to resume after the last `*`: pattern and name positions.
-    let mut star = pattern.len
-    let mut star_name: u64 = 0
+    var star = pattern.len
+    var star_name: u64 = 0
     while n < name.len {
         let c = to_lower(buf.byte_at(name.start + n))
         let width = if p < pattern.len { item_width(buf, pattern, p) } else { 0 }
@@ -40,7 +40,7 @@ fn item_width(_ buf: ByteBuffer, _ pattern: Span, _ p: u64) -> u64 {
     if buf.byte_at(pattern.start + p) != 91 {
         return 1
     }
-    let mut i = p + 1
+    var i = p + 1
     if i < pattern.len && buf.byte_at(pattern.start + i) == 33 {
         i += 1
     }
@@ -62,13 +62,13 @@ fn item_matches(_ buf: ByteBuffer, _ pattern: Span, _ p: u64, _ width: u64, _ c:
     if width == 1 {
         return first == c
     }
-    let mut i = p + 1
+    var i = p + 1
     let negate = buf.byte_at(pattern.start + i) == 33
     if negate {
         i += 1
     }
     let end = p + width - 1
-    let mut found = false
+    var found = false
     while i < end {
         let low = buf.byte_at(pattern.start + i)
         if i + 2 < end && buf.byte_at(pattern.start + i + 1) == 45 {

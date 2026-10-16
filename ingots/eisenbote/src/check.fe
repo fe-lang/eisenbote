@@ -9,7 +9,7 @@ use ingot::news::{News, Status}
 /// a fragment of a configured type and end with a new line. With
 /// `expect_empty`, any such file is an error (used right before a release).
 pub fn check(_ news: mut News, expect_empty: bool) -> Status {
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < news.file_count {
         let status = check_file(mut news, i, expect_empty)
         if !status.is_ok() {

@@ -172,8 +172,8 @@ impl News {
     // Cells of the table regions.
 
     pub fn word(self, _ at: u64) -> u64 {
-        let mut value: u64 = 0
-        let mut i: u64 = 8
+        var value: u64 = 0
+        var i: u64 = 8
         while i > 0 {
             i -= 1
             value = (value << 8) | self.data.byte_at(at + i) as u64
@@ -182,7 +182,7 @@ impl News {
     }
 
     pub fn set_word(mut self, _ at: u64, _ value: u64) {
-        let mut i: u64 = 0
+        var i: u64 = 0
         while i < 8 {
             self.data.set_byte(index: at + i, value: ((value >> (i * 8)) & 0xff).downcast_truncate())
             i += 1
@@ -288,7 +288,7 @@ impl News {
     /// Copy a process argument into the data buffer and return its span.
     pub fn intern_arg(mut self, _ arg: std::native::Arg) -> Span {
         let start = self.data.len()
-        let mut i: usize = 0
+        var i: usize = 0
         while i < arg.len() {
             push(mut self.data, arg.byte_at(i))
             i += 1
@@ -299,7 +299,7 @@ impl News {
     /// Read all records from stdin, then index the files.
     pub fn read(mut self) -> Status uses (input: mut Read) {
         let start = self.data.len()
-        let mut kind = read_char()
+        var kind = read_char()
         while kind >= 0 {
             if !self.read_record(kind) {
                 return Status::MalformedInput
@@ -317,9 +317,9 @@ impl News {
         if read_char() != 32 {
             return false
         }
-        let mut len: u64 = 0
-        let mut c = read_char()
-        let mut digits: u64 = 0
+        var len: u64 = 0
+        var c = read_char()
+        var digits: u64 = 0
         while c >= 48 && c <= 57 && digits < 19 {
             len = len * 10 + (c - 48).downcast_unchecked()
             digits += 1
@@ -377,7 +377,7 @@ impl News {
     }
 
     fn push_word_placeholder(mut self) {
-        let mut i: u64 = 0
+        var i: u64 = 0
         while i < 8 {
             push(mut self.data, 0)
             i += 1
@@ -387,8 +387,8 @@ impl News {
     /// Reserve the file table and fill in names and contents from the records.
     fn index_files(mut self) {
         self.files_base = self.reserve(self.file_count, FILE_COLUMNS)
-        let mut at = self.records.start
-        let mut file: u64 = 0
+        var at = self.records.start
+        var file: u64 = 0
         while at < self.records.end() {
             let kind = self.data.byte_at(at)
             let name = Span { start: at + 9, len: self.word(at + 1) }
@@ -407,8 +407,8 @@ impl News {
     /// Returns a span of length `NONE` if the input ends early.
     fn read_content(mut self, _ len: u64, _ normalize: bool) -> Span uses (input: mut Read) {
         let start = self.data.len()
-        let mut after_cr = false
-        let mut i: u64 = 0
+        var after_cr = false
+        var i: u64 = 0
         while i < len {
             let c = read_char()
             if c < 0 {
@@ -430,7 +430,7 @@ impl News {
 
     /// Index of the fragment type whose directory is `span`, or `NONE`.
     pub fn type_index(self, _ span: Span) -> u64 {
-        let mut i: u64 = 0
+        var i: u64 = 0
         while i < self.type_count {
             if spans_eq(self.data, self.type_directory(i), span) {
                 return i
@@ -451,7 +451,7 @@ impl News {
         {
             return true
         }
-        let mut i: u64 = 0
+        var i: u64 = 0
         while i < self.pattern_count {
             let pattern = self.pattern_span(i)
             if ingot::glob::matches_lower(self.data, pattern, name) {
@@ -468,7 +468,7 @@ impl News {
         // Orphan counters per type, then at most one entry per file.
         let orphans = self.reserve(self.type_count, 1)
         self.entries_base = self.reserve(self.file_count, ENTRY_COLUMNS)
-        let mut f: u64 = 0
+        var f: u64 = 0
         while f < self.file_count {
             let status = self.collect_file(f, orphans)
             if !status.is_ok() {
@@ -524,10 +524,10 @@ impl News {
     pub fn parse_name(mut self, _ f: u64) {
         let name = self.name(f)
         // Walk the parts from the back. `end` is the end of the current part.
-        let mut end = name.end()
-        let mut next_part = Span { start: name.end(), len: 0 }
-        let mut has_next = false
-        let mut pos = name.end()
+        var end = name.end()
+        var next_part = Span { start: name.end(), len: 0 }
+        var has_next = false
+        var pos = name.end()
         while pos > name.start {
             pos -= 1
             if self.data.byte_at(pos) == 46 {
@@ -535,7 +535,7 @@ impl News {
                 let kind = self.type_index(part)
                 if kind != NONE {
                     let issue = normalize_issue(self.data, strip(self.data, Span { start: name.start, len: pos - name.start }))
-                    let mut counter: u64 = 0
+                    var counter: u64 = 0
                     if has_next && all_digits(self.data, next_part) {
                         counter = parse_counter(self.data, next_part)
                     }
@@ -554,7 +554,7 @@ impl News {
     fn find_duplicate(self, _ f: u64) -> bool {
         let kind = self.file_get(f, TYPE)
         let counter = self.file_get(f, COUNTER)
-        let mut g: u64 = 0
+        var g: u64 = 0
         while g < f {
             if self.file_get(g, TYPE) == kind
                 && self.file_get(g, COUNTER) == counter
@@ -575,9 +575,9 @@ impl News {
         let kind = self.file_get(f, TYPE)
         if self.type_get(kind, TYPE_SHOWS_CONTENT) == 1 || self.issue(f).len == 0 {
             let content = strip(self.data, self.content(f))
-            let mut line_start = content.start
+            var line_start = content.start
             while line_start < content.end() {
-                let mut line_end = line_start
+                var line_end = line_start
                 while line_end < content.end() && self.data.byte_at(line_end) != 10 {
                     line_end += 1
                 }
@@ -598,7 +598,7 @@ impl News {
     fn assign_entry(mut self, _ f: u64) {
         let kind = self.file_get(f, TYPE)
         let text = self.file_span(f, TEXT_START)
-        let mut e: u64 = 0
+        var e: u64 = 0
         while e < self.entry_count {
             if self.entry_get(e, ENTRY_TYPE) == kind && spans_eq(self.data, self.entry_text(e), text) {
                 self.file_set(f, ENTRY, e)
@@ -615,13 +615,13 @@ impl News {
 
     /// Fragments of `entry` that have an issue, ordered by issue.
     fn entry_issues(self, _ entry: u64) -> Table {
-        let mut issues = Table::new(1)
-        let mut f: u64 = 0
+        var issues = Table::new(1)
+        var f: u64 = 0
         while f < self.file_count {
             if self.is_news(f) && self.file_get(f, ENTRY) == entry && self.issue(f).len > 0 {
                 // Insertion sort by (issue key, issue).
                 issues.push(f)
-                let mut i = issues.rows() - 1
+                var i = issues.rows() - 1
                 while i > 0 && self.compare_issues(issues.get(i - 1, 0), f, true) > 0 {
                     issues.set(i, 0, issues.get(i - 1, 0))
                     i -= 1
@@ -641,7 +641,7 @@ impl News {
         let x_digits = first_digit_run(self.data, x)
         let y_digits = first_digit_run(self.data, y)
         // Issues without digits sort first, then mixed ones, digit-only ones last.
-        let mut order = compare_u64(issue_class(x, x_digits), issue_class(y, y_digits))
+        var order = compare_u64(issue_class(x, x_digits), issue_class(y, y_digits))
         if order == 0 {
             order = compare_without(self.data, x, x_digits, y, y_digits)
         }
@@ -662,8 +662,8 @@ impl News {
         let empty = Span { start: 0, len: 0 }
         let a_key = if a_issues.rows() == 0 { self.entry_text(a) } else { empty }
         let b_key = if b_issues.rows() == 0 { self.entry_text(b) } else { empty }
-        let mut order = compare_spans(self.data, a_key, b_key)
-        let mut i: u64 = 0
+        var order = compare_spans(self.data, a_key, b_key)
+        var i: u64 = 0
         while order == 0 && i < a_issues.rows() && i < b_issues.rows() {
             order = self.compare_issues(a_issues.get(i, 0), b_issues.get(i, 0), false)
             i += 1
@@ -678,13 +678,13 @@ impl News {
 
     /// Entries of fragment type `kind` in release notes order.
     fn sorted_entries(self, _ kind: u64) -> Table {
-        let mut sorted = Table::new(1)
-        let mut e: u64 = 0
+        var sorted = Table::new(1)
+        var e: u64 = 0
         while e < self.entry_count {
             if self.entry_get(e, ENTRY_TYPE) == kind {
                 // Stable insertion sort.
                 sorted.push(e)
-                let mut i = sorted.rows() - 1
+                var i = sorted.rows() - 1
                 while i > 0 && self.compare_entries(sorted.get(i - 1, 0), e) > 0 {
                     sorted.set(i, 0, sorted.get(i - 1, 0))
                     i -= 1
@@ -719,7 +719,7 @@ impl News {
         if self.entry_count == 0 {
             push_lit(mut out, "No significant changes.\n\n")
         }
-        let mut kind: u64 = 0
+        var kind: u64 = 0
         while kind < self.type_count {
             self.render_section(mut out, kind)
             kind += 1
@@ -734,7 +734,7 @@ impl News {
             push_lit(mut out, " ")
             push_span(mut out, self.data, self.type_span(kind, TYPE_NAME_START))
             push_lit(mut out, "\n\n")
-            let mut i: u64 = 0
+            var i: u64 = 0
             while i < sorted.rows() {
                 self.render_entry(mut out, sorted.get(i, 0))
                 i += 1
@@ -759,7 +759,7 @@ impl News {
                 } else {
                     push_lit(mut out, " (")
                 }
-                let mut i: u64 = 0
+                var i: u64 = 0
                 while i < issues.rows() {
                     if i > 0 {
                         push_lit(mut out, ", ")
@@ -803,7 +803,7 @@ impl News {
             push_span(mut out, self.data, previous)
         } else {
             // Without earlier notes the file ends right after the new ones.
-            let mut end = out.len()
+            var end = out.len()
             while end > notes_start && ingot::buf::is_space(out.byte_at(end - 1)) {
                 end -= 1
             }
@@ -837,7 +837,7 @@ impl News {
 }
 
 fn push_hashes(_ out: mut ByteBuffer, _ count: u64) {
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < count {
         push(mut out, 35)
         i += 1
@@ -849,7 +849,7 @@ fn normalize_issue(_ buf: ByteBuffer, _ issue: Span) -> Span {
     if !all_digits(buf, issue) {
         return issue
     }
-    let mut start = issue.start
+    var start = issue.start
     while start + 1 < issue.end() && buf.byte_at(start) == 48 {
         start += 1
     }
@@ -857,8 +857,8 @@ fn normalize_issue(_ buf: ByteBuffer, _ issue: Span) -> Span {
 }
 
 fn parse_counter(_ buf: ByteBuffer, _ digits: Span) -> u64 {
-    let mut value: u64 = 0
-    let mut i: u64 = 0
+    var value: u64 = 0
+    var i: u64 = 0
     while i < digits.len {
         // Counters only need to tell fragments apart; saturate instead of overflowing.
         let digit = (buf.byte_at(digits.start + i) - 48) as u64
@@ -873,11 +873,11 @@ fn parse_counter(_ buf: ByteBuffer, _ digits: Span) -> u64 {
 
 /// The first run of ASCII digits in `span`, or an empty span at its end.
 fn first_digit_run(_ buf: ByteBuffer, _ span: Span) -> Span {
-    let mut start = span.start
+    var start = span.start
     while start < span.end() && !is_digit(buf.byte_at(start)) {
         start += 1
     }
-    let mut end = start
+    var end = start
     while end < span.end() && is_digit(buf.byte_at(end)) {
         end += 1
     }
@@ -899,7 +899,7 @@ fn issue_class(_ issue: Span, _ digits: Span) -> u64 {
 fn compare_without(_ buf: ByteBuffer, _ x: Span, _ x_cut: Span, _ y: Span, _ y_cut: Span) -> i32 {
     let x_len = x.len - x_cut.len
     let y_len = y.len - y_cut.len
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < x_len && i < y_len {
         let a = byte_without(buf, x, x_cut, i)
         let b = byte_without(buf, y, y_cut, i)
@@ -931,7 +931,7 @@ fn compare_numbers(_ buf: ByteBuffer, _ x: Span, _ y: Span) -> i32 {
 }
 
 fn skip_zeros(_ buf: ByteBuffer, _ digits: Span) -> Span {
-    let mut start = digits.start
+    var start = digits.start
     while start < digits.end() && buf.byte_at(start) == 48 {
         start += 1
     }
@@ -941,7 +941,7 @@ fn skip_zeros(_ buf: ByteBuffer, _ digits: Span) -> Span {
 /// Whether the text contains a nested markdown list, which moves the issue
 /// links onto their own line.
 fn has_sublist(_ buf: ByteBuffer, _ text: Span) -> bool {
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i + 5 <= text.len {
         let at = text.start + i
         let bullet = buf.byte_at(at + 3)

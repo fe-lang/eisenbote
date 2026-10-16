@@ -26,7 +26,7 @@ pub use lutz::Key as Literal
 
 pub fn push_lit<T: Literal>(_ buf: mut ByteBuffer, _ text: T) {
     let bytes = text.bytes()
-    let mut i: usize = 0
+    var i: usize = 0
     while i < T::SIZE {
         push(mut buf, bytes[i])
         i += 1
@@ -35,7 +35,7 @@ pub fn push_lit<T: Literal>(_ buf: mut ByteBuffer, _ text: T) {
 
 /// Append `span` of `source` to `buf`.
 pub fn push_span(_ buf: mut ByteBuffer, _ source: ByteBuffer, _ span: Span) {
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < span.len {
         push(mut buf, source.byte_at(span.start + i))
         i += 1
@@ -44,7 +44,7 @@ pub fn push_span(_ buf: mut ByteBuffer, _ source: ByteBuffer, _ span: Span) {
 
 /// Append `span` of `buf` to its own end.
 pub fn push_own_span(_ buf: mut ByteBuffer, _ span: Span) {
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < span.len {
         let byte = buf.byte_at(span.start + i)
         push(mut buf, byte)
@@ -57,7 +57,7 @@ pub fn span_eq_lit<T: Literal>(_ buf: ByteBuffer, _ span: Span, _ text: T) -> bo
     if span.len as usize != T::SIZE {
         return false
     }
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < span.len {
         if buf.byte_at(span.start + i) != bytes[i as usize] {
             return false
@@ -73,7 +73,7 @@ pub fn span_eq_lit_lower<T: Literal>(_ buf: ByteBuffer, _ span: Span, _ text: T)
     if span.len as usize != T::SIZE {
         return false
     }
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < span.len {
         if to_lower(buf.byte_at(span.start + i)) != bytes[i as usize] {
             return false
@@ -94,7 +94,7 @@ pub fn compare_spans(_ buf: ByteBuffer, _ a: Span, _ b: Span) -> i32 {
 
 /// `compare_spans` for spans of different buffers.
 pub fn compare_between(_ a_buf: ByteBuffer, _ a: Span, _ b_buf: ByteBuffer, _ b: Span) -> i32 {
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < a.len && i < b.len {
         let x = a_buf.byte_at(a.start + i)
         let y = b_buf.byte_at(b.start + i)
@@ -125,7 +125,7 @@ pub fn find_in(_ buf: ByteBuffer, _ haystack: Span, _ needle_buf: ByteBuffer, _ 
     if needle.len > haystack.len {
         return haystack.len
     }
-    let mut offset: u64 = 0
+    var offset: u64 = 0
     while offset + needle.len <= haystack.len {
         let candidate = Span { start: haystack.start + offset, len: needle.len }
         if compare_between(buf, candidate, needle_buf, needle) == 0 {
@@ -153,7 +153,7 @@ pub fn all_digits(_ buf: ByteBuffer, _ span: Span) -> bool {
     if span.len == 0 {
         return false
     }
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < span.len {
         if !is_digit(buf.byte_at(span.start + i)) {
             return false
@@ -168,7 +168,7 @@ pub fn strip(_ buf: ByteBuffer, _ span: Span) -> Span {
 }
 
 pub fn lstrip(_ buf: ByteBuffer, _ span: Span) -> Span {
-    let mut start = span.start
+    var start = span.start
     while start < span.end() && is_space(buf.byte_at(start)) {
         start += 1
     }
@@ -176,7 +176,7 @@ pub fn lstrip(_ buf: ByteBuffer, _ span: Span) -> Span {
 }
 
 pub fn rstrip(_ buf: ByteBuffer, _ span: Span) -> Span {
-    let mut end = span.end()
+    var end = span.end()
     while end > span.start && is_space(buf.byte_at(end - 1)) {
         end -= 1
     }
@@ -208,8 +208,8 @@ impl Table {
     pub fn get(self, _ row: u64, _ column: u64) -> u64 {
         core::assert(column < self.columns)
         let base = (row * self.columns + column) * 8
-        let mut value: u64 = 0
-        let mut i: u64 = 8
+        var value: u64 = 0
+        var i: u64 = 8
         while i > 0 {
             i -= 1
             value = (value << 8) | self.cells.byte_at(base + i) as u64
@@ -220,7 +220,7 @@ impl Table {
     pub fn set(mut self, _ row: u64, _ column: u64, _ value: u64) {
         core::assert(column < self.columns)
         let base = (row * self.columns + column) * 8
-        let mut i: u64 = 0
+        var i: u64 = 0
         while i < 8 {
             self.cells.set_byte(index: base + i, value: ((value >> (i * 8)) & 0xff).downcast_truncate())
             i += 1

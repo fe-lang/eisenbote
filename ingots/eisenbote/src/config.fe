@@ -42,7 +42,7 @@ impl News {
             self.push_toml_error(doc)
             return self.end_message()
         }
-        let mut table = doc.root()
+        var table = doc.root()
         if self.towncrier_file() {
             table = lookup(doc, lookup(doc, doc.root(), "tool"), "towncrier")
             if table == NONE || !doc.is_table(table) {
@@ -125,9 +125,9 @@ impl News {
     /// error, like `Document::push_error` (which needs a separate buffer).
     fn push_toml_error(mut self, _ doc: Document) {
         let offset = doc.error_offset()
-        let mut line: u64 = 1
-        let mut column: u64 = 1
-        let mut i: u64 = 0
+        var line: u64 = 1
+        var column: u64 = 1
+        var i: u64 = 0
         while i < offset && i < self.settings.len {
             let c = self.data.byte_at(self.settings.start + i)
             if c == 10 {
@@ -165,7 +165,7 @@ impl News {
 
     /// Reject unknown keys, and keys whose behavior isn't implemented.
     fn check_keys(mut self, _ doc: Document, _ table: u64) -> Status {
-        let mut entry = doc.first(table)
+        var entry = doc.first(table)
         while entry != NONE {
             let key = doc.key(entry)
             if !is_key(doc, key, "directory") && !is_key(doc, key, "filename")
@@ -198,7 +198,7 @@ impl News {
 
     fn copy_doc_span(mut self, _ doc: Document, _ span: lutz::Span) -> Span {
         let start = self.data.len()
-        let mut i: u64 = 0
+        var i: u64 = 0
         while i < span.len {
             push(mut self.data, doc.byte_at(span.start + i))
             i += 1
@@ -291,9 +291,9 @@ impl News {
     /// Like towncrier: the `#`s that start a line of the title and are
     /// followed by whitespace, or 0.
     fn leading_hashes(self, _ format: Span) -> u64 {
-        let mut line = format.start
+        var line = format.start
         while line < format.end() {
-            let mut i = line
+            var i = line
             while i < format.end() && self.data.byte_at(i) == 35 {
                 i += 1
             }
@@ -325,7 +325,7 @@ impl News {
             return false
         }
         // towncrier turns formats like "[#{issue}]: url" into link references.
-        let mut i = self.issue_format.start
+        var i = self.issue_format.start
         while i + 3 <= self.issue_format.end() {
             if self.data.byte_at(i) == 93 && self.data.byte_at(i + 1) == 58 && self.data.byte_at(i + 2) == 32 {
                 self.begin_message()
@@ -341,7 +341,7 @@ impl News {
     /// Check that `format` only uses `{name}`, `{version}` and `{project_date}`,
     /// or with `issue` only `{issue}`, and that braces are balanced.
     fn check_format(mut self, _ format: Span, _ issue: bool) -> bool {
-        let mut i = format.start
+        var i = format.start
         while i < format.end() {
             let width = self.format_item(format, i, issue)
             if width == 0 {
@@ -411,7 +411,7 @@ impl News {
 
     /// Append `format` with its fields replaced.
     fn push_format(self, _ out: mut ByteBuffer, _ format: Span, _ version: Span, _ date: Span, _ issue: Span) {
-        let mut i = format.start
+        var i = format.start
         while i < format.end() {
             let c = self.data.byte_at(i)
             if c == 123 || c == 125 {
@@ -470,13 +470,13 @@ impl News {
         }
         self.strict = true
         self.patterns_base = self.reserve(doc.len(node), PATTERN_COLUMNS)
-        let mut item = doc.first(node)
+        var item = doc.first(node)
         while item != NONE {
             if !doc.is_string(item) {
                 return self.ignore_error()
             }
             let pattern = self.copy_doc_span(doc, doc.value(item))
-            let mut i = pattern.start
+            var i = pattern.start
             while i < pattern.end() {
                 self.data.set_byte(index: i, value: to_lower(self.data.byte_at(i)))
                 i += 1
@@ -530,7 +530,7 @@ impl News {
     /// Add a type to the reserved region; a repeated directory updates the
     /// earlier type in place.
     fn add_type(mut self, _ directory: Span, _ name: Span, _ shows_content: bool) {
-        let mut row = self.type_index(directory)
+        var row = self.type_index(directory)
         if row == ingot::news::NONE {
             row = self.type_count
             self.type_count += 1
@@ -547,7 +547,7 @@ impl News {
             return self.type_error()
         }
         self.types_base = self.reserve(doc.len(types), TYPE_COLUMNS)
-        let mut item = doc.first(types)
+        var item = doc.first(types)
         while item != NONE {
             if !doc.is_table(item) || !self.check_type_keys(doc, item) {
                 return self.type_error()
@@ -558,7 +558,7 @@ impl News {
             }
             let name = self.copy_doc_span(doc, doc.value(name_node))
             let directory_node = lookup(doc, item, "directory")
-            let mut directory = Span { start: 0, len: 0 }
+            var directory = Span { start: 0, len: 0 }
             if directory_node == NONE {
                 // towncrier uses the lower-case name.
                 directory = self.lowered_copy(name)
@@ -584,10 +584,10 @@ impl News {
         // Sort the entries by directory, then add them in that order.
         let count = doc.len(fragments)
         let order = self.reserve(count, 1)
-        let mut entry = doc.first(fragments)
-        let mut n: u64 = 0
+        var entry = doc.first(fragments)
+        var n: u64 = 0
         while entry != NONE {
-            let mut i = n
+            var i = n
             while i > 0 && compare_keys(doc, self.word(order + (i - 1) * 8), entry) > 0 {
                 self.set_word(order + i * 8, self.word(order + (i - 1) * 8))
                 i -= 1
@@ -597,7 +597,7 @@ impl News {
             entry = doc.next(entry)
         }
         self.types_base = self.reserve(count, TYPE_COLUMNS)
-        let mut k: u64 = 0
+        var k: u64 = 0
         while k < count {
             if !self.add_fragment_table(doc, self.word(order + k * 8)) {
                 return false
@@ -613,7 +613,7 @@ impl News {
         }
         let directory = self.copy_doc_span(doc, doc.key(entry))
         let name_node = lookup(doc, entry, "name")
-        let mut name = Span { start: 0, len: 0 }
+        var name = Span { start: 0, len: 0 }
         if name_node == NONE {
             // Python's str.capitalize.
             name = self.lowered_copy(directory)
@@ -649,7 +649,7 @@ impl News {
     }
 
     fn check_type_keys(self, _ doc: Document, _ table: u64) -> bool {
-        let mut entry = doc.first(table)
+        var entry = doc.first(table)
         while entry != NONE {
             let key = doc.key(entry)
             if !is_key(doc, key, "name") && !is_key(doc, key, "directory")
@@ -676,7 +676,7 @@ impl News {
     /// Copy `span` in ASCII lower case.
     fn lowered_copy(mut self, _ span: Span) -> Span {
         let start = self.data.len()
-        let mut i: u64 = 0
+        var i: u64 = 0
         while i < span.len {
             let c = to_lower(self.data.byte_at(span.start + i))
             push(mut self.data, c)
@@ -687,7 +687,7 @@ impl News {
 }
 
 fn push_decimal(_ buf: mut ByteBuffer, _ value: u64) {
-    let mut divisor: u64 = 1
+    var divisor: u64 = 1
     while value / divisor >= 10 {
         divisor *= 10
     }
@@ -737,7 +737,7 @@ fn is_key<T: Literal>(_ doc: Document, _ key: lutz::Span, _ name: T) -> bool {
     if key.len as usize != T::SIZE {
         return false
     }
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < key.len {
         if doc.byte_at(key.start + i) != bytes[i as usize] {
             return false
@@ -751,7 +751,7 @@ fn is_key<T: Literal>(_ doc: Document, _ key: lutz::Span, _ name: T) -> bool {
 fn compare_keys(_ doc: Document, _ a: u64, _ b: u64) -> i32 {
     let x = doc.key(a)
     let y = doc.key(b)
-    let mut i: u64 = 0
+    var i: u64 = 0
     while i < x.len && i < y.len {
         let p = doc.byte_at(x.start + i)
         let q = doc.byte_at(y.start + i)
