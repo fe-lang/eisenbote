@@ -3,4 +3,4 @@ name = "eisenbote"
 version = "0.1.0"
 
 [dependencies]
-lutz = { source = "https://github.com/fe-lang/lutz.git", rev = "6bd5a1837427746445bbd2709e39772c6b1aeed9", path = "ingots/lutz" }
+lutz = { source = "https://github.com/fe-lang/lutz.git", rev = "a1f2cbd17ae1a68bee104f33b75a150851751c35", path = "ingots/lutz" }
