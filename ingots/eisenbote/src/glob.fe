@@ -1,10 +1,10 @@
 //! File name patterns as in Python's `fnmatch`: `*`, `?`, `[seq]` and `[!seq]`.
 
 use ingot::buf::{Span, to_lower}
-use std::native::ByteBuffer
+use core::MemBuffer
 
 /// Whether `name`, in ASCII lower case, matches `pattern` (both spans of `buf`).
-pub fn matches_lower(_ buf: ByteBuffer, _ pattern: Span, _ name: Span) -> bool {
+pub fn matches_lower(_ buf: MemBuffer, _ pattern: Span, _ name: Span) -> bool {
     var p: u64 = 0
     var n: u64 = 0
     // Where to resume after the last `*`: pattern and name positions.
@@ -36,7 +36,7 @@ pub fn matches_lower(_ buf: ByteBuffer, _ pattern: Span, _ name: Span) -> bool {
 
 /// The length of the pattern item at `p`: a byte, `?`, or a `[...]` class.
 /// An unclosed `[` is a literal byte.
-fn item_width(_ buf: ByteBuffer, _ pattern: Span, _ p: u64) -> u64 {
+fn item_width(_ buf: MemBuffer, _ pattern: Span, _ p: u64) -> u64 {
     if buf.byte_at(pattern.start + p) != 91 {
         return 1
     }
@@ -54,7 +54,7 @@ fn item_width(_ buf: ByteBuffer, _ pattern: Span, _ p: u64) -> u64 {
     if i >= pattern.len { 1 } else { i - p + 1 }
 }
 
-fn item_matches(_ buf: ByteBuffer, _ pattern: Span, _ p: u64, _ width: u64, _ c: u8) -> bool {
+fn item_matches(_ buf: MemBuffer, _ pattern: Span, _ p: u64, _ width: u64, _ c: u8) -> bool {
     let first = buf.byte_at(pattern.start + p)
     if first == 63 {
         return true

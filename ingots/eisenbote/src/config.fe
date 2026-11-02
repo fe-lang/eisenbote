@@ -11,7 +11,7 @@ use ingot::news::{
     News, PATTERN_COLUMNS, Status, TITLE_DEFAULT, TITLE_FORMAT, TITLE_NONE, TYPE_COLUMNS,
     TYPE_DIRECTORY_LEN, TYPE_DIRECTORY_START, TYPE_NAME_LEN, TYPE_NAME_START, TYPE_SHOWS_CONTENT,
 }
-use std::native::ByteBuffer
+use core::MemBuffer
 use lutz::{Document, Error, NONE}
 
 // Fields of format strings.
@@ -84,10 +84,10 @@ impl News {
         }
         self.start_string = self.last_string
         if self.start_string.len == 0 {
-            let start = self.data.len()
+            let start = self.data.size()
             push_lit(mut self.data, "<!-- towncrier release ")
             push_lit(mut self.data, "notes start -->\n")
-            self.start_string = Span { start, len: self.data.len() - start }
+            self.start_string = Span { start, len: self.data.size() - start }
         }
         if !self.string_setting(doc, table, "name", "") {
             return self.end_message()
@@ -197,13 +197,13 @@ impl News {
     }
 
     fn copy_doc_span(mut self, _ doc: Document, _ span: lutz::Span) -> Span {
-        let start = self.data.len()
+        let start = self.data.size()
         var i: u64 = 0
         while i < span.len {
             push(mut self.data, doc.byte_at(span.start + i))
             i += 1
         }
-        Span { start, len: self.data.len() - start }
+        Span { start, len: self.data.size() - start }
     }
 
     /// Copy the string setting `key` (or `default`) into the data buffer as
@@ -212,9 +212,9 @@ impl News {
     fn string_setting<K: Literal, D: Literal>(mut self, _ doc: Document, _ table: u64, _ key: K, _ default: D) -> bool {
         let node = lookup(doc, table, key)
         if node == NONE {
-            let start = self.data.len()
+            let start = self.data.size()
             push_lit(mut self.data, default)
-            self.last_string = Span { start, len: self.data.len() - start }
+            self.last_string = Span { start, len: self.data.size() - start }
             return true
         }
         if !doc.is_string(node) {
@@ -410,7 +410,7 @@ impl News {
     }
 
     /// Append `format` with its fields replaced.
-    fn push_format(self, _ out: mut ByteBuffer, _ format: Span, _ version: Span, _ date: Span, _ issue: Span) {
+    fn push_format(self, _ out: mut MemBuffer, _ format: Span, _ version: Span, _ date: Span, _ issue: Span) {
         var i = format.start
         while i < format.end() {
             let c = self.data.byte_at(i)
@@ -441,12 +441,12 @@ impl News {
     }
 
     /// Append the formatted `title_format`.
-    pub fn push_title(self, _ out: mut ByteBuffer, _ version: Span, _ date: Span) {
+    pub fn push_title(self, _ out: mut MemBuffer, _ version: Span, _ date: Span) {
         self.push_format(mut out, self.title_format, version, date, Span { start: 0, len: 0 })
     }
 
     /// Append an issue reference: `issue_format`, or `#<issue>` for numbers.
-    pub fn push_issue(self, _ out: mut ByteBuffer, _ issue: Span) {
+    pub fn push_issue(self, _ out: mut MemBuffer, _ issue: Span) {
         if self.has_issue_format {
             let empty = Span { start: 0, len: 0 }
             self.push_format(mut out, self.issue_format, empty, empty, issue)
@@ -516,13 +516,13 @@ impl News {
     }
 
     fn add_default_type<D: Literal, N: Literal>(mut self, _ directory: D, _ name: N, _ shows_content: bool) {
-        let directory_start = self.data.len()
+        let directory_start = self.data.size()
         push_lit(mut self.data, directory)
-        let name_start = self.data.len()
+        let name_start = self.data.size()
         push_lit(mut self.data, name)
         self.add_type(
             Span { start: directory_start, len: name_start - directory_start },
-            Span { start: name_start, len: self.data.len() - name_start },
+            Span { start: name_start, len: self.data.size() - name_start },
             shows_content,
         )
     }
@@ -675,7 +675,7 @@ impl News {
 
     /// Copy `span` in ASCII lower case.
     fn lowered_copy(mut self, _ span: Span) -> Span {
-        let start = self.data.len()
+        let start = self.data.size()
         var i: u64 = 0
         while i < span.len {
             let c = to_lower(self.data.byte_at(span.start + i))
@@ -686,7 +686,7 @@ impl News {
     }
 }
 
-fn push_decimal(_ buf: mut ByteBuffer, _ value: u64) {
+fn push_decimal(_ buf: mut MemBuffer, _ value: u64) {
     var divisor: u64 = 1
     while value / divisor >= 10 {
         divisor *= 10
@@ -697,7 +697,7 @@ fn push_decimal(_ buf: mut ByteBuffer, _ value: u64) {
     }
 }
 
-fn push_error_text(_ out: mut ByteBuffer, _ error: Error) {
+fn push_error_text(_ out: mut MemBuffer, _ error: Error) {
     match error {
         Error::InvalidUtf8 => push_lit(mut out, "invalid UTF-8")
         Error::UnexpectedEnd => push_lit(mut out, "unexpected end of input")

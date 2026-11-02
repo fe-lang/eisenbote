@@ -2,15 +2,15 @@ use ingot::buf::{
     Span, Table, compare_spans, find_in, lstrip, push_lit, rstrip, span_eq_lit, span_eq_lit_lower,
     strip,
 }
-use std::native::ByteBuffer
+use core::MemBuffer
 
-fn text(_ buf: ByteBuffer) -> Span {
-    Span { start: 0, len: buf.len() }
+fn text(_ buf: MemBuffer) -> Span {
+    Span { start: 0, len: buf.size() }
 }
 
 #[test]
 fn strip_removes_ascii_whitespace() {
-    var buf = ByteBuffer::new()
+    var buf = MemBuffer::empty()
     push_lit(mut buf, " \t\n x y \r\n")
     let all = text(buf)
     let stripped = strip(buf, all)
@@ -19,24 +19,22 @@ fn strip_removes_ascii_whitespace() {
     core::assert(rstrip(buf, all).len == 7)
     let blank = Span { start: 0, len: 3 }
     core::assert(strip(buf, blank).len == 0)
-    buf.release()
 }
 
 #[test]
 fn literals_compare_exactly_or_ignoring_case() {
-    var buf = ByteBuffer::new()
+    var buf = MemBuffer::empty()
     push_lit(mut buf, "ReadMe.MD")
     let name = text(buf)
     core::assert(!span_eq_lit(buf, name, "readme.md"))
     core::assert(span_eq_lit_lower(buf, name, "readme.md"))
     core::assert(!span_eq_lit_lower(buf, name, "readme"))
     core::assert(span_eq_lit(buf, Span { start: 0, len: 4 }, "Read"))
-    buf.release()
 }
 
 #[test]
 fn spans_order_bytewise_then_by_length() {
-    var buf = ByteBuffer::new()
+    var buf = MemBuffer::empty()
     push_lit(mut buf, "abcab")
     let abc = Span { start: 0, len: 3 }
     let ab = Span { start: 3, len: 2 }
@@ -45,22 +43,19 @@ fn spans_order_bytewise_then_by_length() {
     core::assert(compare_spans(buf, abc, ab) == 1)
     core::assert(compare_spans(buf, b, abc) == 1)
     core::assert(compare_spans(buf, ab, Span { start: 0, len: 2 }) == 0)
-    buf.release()
 }
 
 #[test]
 fn find_reports_first_match_or_haystack_length() {
-    var hay = ByteBuffer::new()
+    var hay = MemBuffer::empty()
     push_lit(mut hay, "one marker two marker")
-    var needle = ByteBuffer::new()
+    var needle = MemBuffer::empty()
     push_lit(mut needle, "marker")
     let all = text(hay)
     let marker = text(needle)
     core::assert(find_in(hay, all, needle, marker) == 4)
     core::assert(find_in(hay, Span { start: 5, len: 16 }, needle, marker) == 10)
     core::assert(find_in(hay, Span { start: 0, len: 9 }, needle, marker) == 9)
-    hay.release()
-    needle.release()
 }
 
 #[test]
@@ -74,5 +69,4 @@ fn table_cells_round_trip() {
     core::assert(table.get(row, 0) == 0xffffffffffffffff)
     core::assert(table.get(row, 1) == 0)
     core::assert(table.get(row, 2) == 0x0102030405060708)
-    table.release()
 }

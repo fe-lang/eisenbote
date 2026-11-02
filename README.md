@@ -127,7 +127,7 @@ resort.
 ## Design
 
 Native Fe programs can currently only use stdin, stdout, process arguments
-and heap buffers (`std::native::ByteBuffer`); there is no file system access.
+and heap buffers (`core::MemBuffer`); there is no file system access.
 So the work is split:
 
 - `out/eisenbote` (built from `ingots/eisenbote`) does everything: it parses

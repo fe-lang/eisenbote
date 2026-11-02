@@ -17,34 +17,24 @@
 use ingot::buf::{Span, Table, push_lit, push_span, span_eq_lit}
 use ingot::check::check
 use ingot::news::{News, Status}
-use std::io::{Read, Write, host, write_char}
-use std::native::{Args, ByteBuffer}
+use core::MemBuffer
+use std::env::Args
+use std::io::{Stdin, Stdio, print_buffer}
 
-pub fn main(argc: i32, argv: **u8) -> i32 {
-    let args = unsafe { Args::new(argc, argv) }
+pub fn main() -> i32 uses (args: Args, io: mut Stdio) {
     var news = News::new()
-    var out = ByteBuffer::new()
+    var out = MemBuffer::empty()
     // Copy the arguments so that only `news` is borrowed from here on.
     var words = Table::new(2)
     var i: usize = 1
-    while i < args.len() {
+    while i < args.count() {
         let span = news.intern_arg(args.get(i))
         words.push(span.start)
         words.set(words.rows() - 1, 1, span.len)
         i += 1
     }
-    let code = with (Read = host(), Write = host()) {
-        let code = run(words, mut news, mut out)
-        var j: u64 = 0
-        while j < out.len() {
-            write_char(out.byte_at(j) as i32)
-            j += 1
-        }
-        code
-    }
-    words.release()
-    out.release()
-    news.release()
+    let code = run(words, mut news, mut out)
+    print_buffer(out)
     code
 }
 
@@ -61,7 +51,7 @@ const CHECK_EMPTY: u64 = 6
 ///
 /// The steps are split into small functions: borrow checking a function that
 /// both updates `news` and writes `out` many times gets slow.
-fn run(_ words: Table, _ news: mut News, _ out: mut ByteBuffer) -> i32 uses (input: mut Read) {
+fn run(_ words: Table, _ news: mut News, _ out: mut MemBuffer) -> i32 uses (input: mut Stdin) {
     let command = parse_command(words, news)
     if command == USAGE {
         return usage(mut out)
@@ -97,7 +87,7 @@ fn parse_command(_ words: Table, _ news: News) -> u64 {
     if count != expected { USAGE } else { command }
 }
 
-fn load(_ news: mut News) -> Status uses (input: mut Read) {
+fn load(_ news: mut News) -> Status uses (input: mut Stdin) {
     let status = news.read()
     if !status.is_ok() {
         return status
@@ -105,7 +95,7 @@ fn load(_ news: mut News) -> Status uses (input: mut Read) {
     news.load_settings()
 }
 
-fn execute(_ command: u64, _ words: Table, _ news: mut News, _ out: mut ByteBuffer) -> i32 {
+fn execute(_ command: u64, _ words: Table, _ news: mut News, _ out: mut MemBuffer) -> i32 {
     if command == PATHS {
         return paths(news, mut out)
     }
@@ -123,7 +113,7 @@ fn execute(_ command: u64, _ words: Table, _ news: mut News, _ out: mut ByteBuff
     release_notes(command == DRAFT, words, mut news, mut out)
 }
 
-fn paths(_ news: News, _ out: mut ByteBuffer) -> i32 {
+fn paths(_ news: News, _ out: mut MemBuffer) -> i32 {
     push_span(mut out, news.data, news.directory)
     push_lit(mut out, "\n")
     push_span(mut out, news.data, news.filename)
@@ -131,7 +121,7 @@ fn paths(_ news: News, _ out: mut ByteBuffer) -> i32 {
     0
 }
 
-fn list(_ news: News, _ out: mut ByteBuffer) -> i32 {
+fn list(_ news: News, _ out: mut MemBuffer) -> i32 {
     var f: u64 = 0
     while f < news.file_count {
         if news.is_news(f) {
@@ -143,7 +133,7 @@ fn list(_ news: News, _ out: mut ByteBuffer) -> i32 {
     0
 }
 
-fn release_notes(_ draft: bool, _ words: Table, _ news: mut News, _ out: mut ByteBuffer) -> i32 {
+fn release_notes(_ draft: bool, _ words: Table, _ news: mut News, _ out: mut MemBuffer) -> i32 {
     var version = word(words, 1)
     if version.len == 0 {
         version = news.version
@@ -171,7 +161,7 @@ fn word(_ words: Table, _ index: u64) -> Span {
     Span { start: words.get(index, 0), len: words.get(index, 1) }
 }
 
-fn fail(_ out: mut ByteBuffer, _ news: News, _ status: Status) -> i32 {
+fn fail(_ out: mut MemBuffer, _ news: News, _ status: Status) -> i32 {
     match status {
         Status::MalformedInput => push_lit(mut out, "malformed input stream")
         Status::AlreadyReleased => {
@@ -185,7 +175,7 @@ fn fail(_ out: mut ByteBuffer, _ news: News, _ status: Status) -> i32 {
     1
 }
 
-fn usage(_ out: mut ByteBuffer) -> i32 {
+fn usage(_ out: mut MemBuffer) -> i32 {
     push_lit(mut out, "usage: eisenbote ")
     push_lit(mut out, "(draft|build) <version> <date>")
     push_lit(mut out, " | paths | list | check | ")

@@ -4,8 +4,9 @@ use ingot::buf::{
     Span, Table, all_digits, compare_spans, compare_u64, find_in, is_digit, lstrip, push,
     push_lit, push_own_span, push_span, rstrip, span_eq_lit_lower, spans_eq, strip,
 }
-use std::io::{Read, read_char}
-use std::native::ByteBuffer
+use std::env::Arg
+use std::io::{Stdin, StdinReader}
+use core::{MemBuffer, Option}
 
 /// Marks a missing type or row.
 pub const NONE: u64 = 0xffffffffffffffff
@@ -90,7 +91,7 @@ impl Status {
 /// Line endings in fragments and the changelog are normalized to `\n`.
 pub struct News {
     /// The records, derived text and tables.
-    pub data: ByteBuffer,
+    pub data: MemBuffer,
     /// Byte offsets of the table regions, and their row counts.
     pub types_base: u64,
     pub type_count: u64,
@@ -133,7 +134,7 @@ impl News {
     pub fn new() -> Self {
         let empty = Span { start: 0, len: 0 }
         Self {
-            data: ByteBuffer::new(),
+            data: MemBuffer::empty(),
             types_base: 0,
             type_count: 0,
             patterns_base: 0,
@@ -165,10 +166,6 @@ impl News {
         }
     }
 
-    pub fn release(own self) {
-        self.data.release()
-    }
-
     // Cells of the table regions.
 
     pub fn word(self, _ at: u64) -> u64 {
@@ -191,8 +188,8 @@ impl News {
 
     /// Reserve a zeroed table region of `rows` rows and return its offset.
     pub fn reserve(mut self, _ rows: u64, _ columns: u64) -> u64 {
-        let base = self.data.len()
-        core::assert(self.data.try_resize(base + rows * columns * 8))
+        let base = self.data.size()
+        core::assert(self.data.try_resize((base + rows * columns * 8).downcast_unchecked()))
         base
     }
 
@@ -255,11 +252,11 @@ impl News {
     /// Start a failure message; append to it with `push_lit(mut news.data, ..)`
     /// and close it with `end_message`.
     pub fn begin_message(mut self) {
-        self.message = Span { start: self.data.len(), len: 0 }
+        self.message = Span { start: self.data.size(), len: 0 }
     }
 
     pub fn end_message(mut self) -> Status {
-        self.message.len = self.data.len() - self.message.start
+        self.message.len = self.data.size() - self.message.start
         Status::Failed
     }
 
@@ -286,52 +283,49 @@ impl News {
     }
 
     /// Copy a process argument into the data buffer and return its span.
-    pub fn intern_arg(mut self, _ arg: std::native::Arg) -> Span {
-        let start = self.data.len()
-        var i: usize = 0
-        while i < arg.len() {
-            push(mut self.data, arg.byte_at(i))
-            i += 1
-        }
-        Span { start, len: self.data.len() - start }
+    pub fn intern_arg(mut self, _ arg: Arg) -> Span {
+        let start = self.data.size()
+        self.data.extend_from(arg.span())
+        Span { start, len: self.data.size() - start }
     }
 
     /// Read all records from stdin, then index the files.
-    pub fn read(mut self) -> Status uses (input: mut Read) {
-        let start = self.data.len()
-        var kind = read_char()
+    pub fn read(mut self) -> Status uses (input: mut Stdin) {
+        let start = self.data.size()
+        var reader = StdinReader::new()
+        var kind = read_char(mut reader)
         while kind >= 0 {
-            if !self.read_record(kind) {
+            if !self.read_record(mut reader, kind) {
                 return Status::MalformedInput
             }
-            kind = read_char()
+            kind = read_char(mut reader)
         }
-        self.records = Span { start, len: self.data.len() - start }
+        self.records = Span { start, len: self.data.size() - start }
         self.index_files()
         Status::Ok
     }
 
     /// Read the record after its kind byte and store it as kind byte, name
     /// length, name, content length and content.
-    fn read_record(mut self, _ kind: i32) -> bool uses (input: mut Read) {
-        if read_char() != 32 {
+    fn read_record(mut self, _ reader: mut StdinReader, _ kind: i32) -> bool uses (input: mut Stdin) {
+        if read_char(mut reader) != 32 {
             return false
         }
         var len: u64 = 0
-        var c = read_char()
+        var c = read_char(mut reader)
         var digits: u64 = 0
         while c >= 48 && c <= 57 && digits < 19 {
             len = len * 10 + (c - 48).downcast_unchecked()
             digits += 1
-            c = read_char()
+            c = read_char(mut reader)
         }
         if digits == 0 || (kind != 67 && kind != 70 && kind != 83) {
             return false
         }
-        let header = self.data.len()
+        let header = self.data.size()
         push(mut self.data, kind.downcast_unchecked())
         self.push_word_placeholder()
-        let name_start = self.data.len()
+        let name_start = self.data.size()
         if kind == 67 {
             // 'C' has no name.
             if c != 10 || self.has_changelog {
@@ -341,21 +335,21 @@ impl News {
             if c != 32 {
                 return false
             }
-            c = read_char()
+            c = read_char(mut reader)
             while c >= 0 && c != 10 {
                 push(mut self.data, c.downcast_unchecked())
-                c = read_char()
+                c = read_char(mut reader)
             }
             if c != 10 {
                 return false
             }
         }
-        let name = Span { start: name_start, len: self.data.len() - name_start }
+        let name = Span { start: name_start, len: self.data.size() - name_start }
         self.set_word(header + 1, name.len)
-        let content_header = self.data.len()
+        let content_header = self.data.size()
         self.push_word_placeholder()
         // The settings are TOML, which the parser checks byte for byte.
-        let content = self.read_content(len, kind != 83)
+        let content = self.read_content(mut reader, len, kind != 83)
         if content.len == NONE {
             return false
         }
@@ -405,12 +399,12 @@ impl News {
 
     /// Read `len` bytes, with `normalize` turning `\r\n` and `\r` into `\n`.
     /// Returns a span of length `NONE` if the input ends early.
-    fn read_content(mut self, _ len: u64, _ normalize: bool) -> Span uses (input: mut Read) {
-        let start = self.data.len()
+    fn read_content(mut self, _ reader: mut StdinReader, _ len: u64, _ normalize: bool) -> Span uses (input: mut Stdin) {
+        let start = self.data.size()
         var after_cr = false
         var i: u64 = 0
         while i < len {
-            let c = read_char()
+            let c = read_char(mut reader)
             if c < 0 {
                 return Span { start, len: NONE }
             }
@@ -425,7 +419,7 @@ impl News {
             }
             i += 1
         }
-        Span { start, len: self.data.len() - start }
+        Span { start, len: self.data.size() - start }
     }
 
     /// Index of the fragment type whose directory is `span`, or `NONE`.
@@ -571,7 +565,7 @@ impl News {
     /// under the bullet. Types that do not show content use an empty text for
     /// fragments with an issue.
     fn derive_text(mut self, _ f: u64) {
-        let start = self.data.len()
+        let start = self.data.size()
         let kind = self.file_get(f, TYPE)
         if self.type_get(kind, TYPE_SHOWS_CONTENT) == 1 || self.issue(f).len == 0 {
             let content = strip(self.data, self.content(f))
@@ -592,7 +586,7 @@ impl News {
                 line_start = line_end
             }
         }
-        self.set_file_span(f, TEXT_START, Span { start, len: self.data.len() - start })
+        self.set_file_span(f, TEXT_START, Span { start, len: self.data.size() - start })
     }
 
     fn assign_entry(mut self, _ f: u64) {
@@ -671,8 +665,6 @@ impl News {
         if order == 0 {
             order = compare_u64(a_issues.rows(), b_issues.rows())
         }
-        a_issues.release()
-        b_issues.release()
         order
     }
 
@@ -698,7 +690,7 @@ impl News {
 
     /// Append the release notes as towncrier writes them: the formatted
     /// `title_format` (if any) and the rendered template.
-    pub fn render(self, _ out: mut ByteBuffer, version: Span, date: Span) {
+    pub fn render(self, _ out: mut MemBuffer, version: Span, date: Span) {
         if self.title_mode == TITLE_FORMAT {
             self.push_title(mut out, version, date)
             push_lit(mut out, "\n")
@@ -727,7 +719,7 @@ impl News {
         push_lit(mut out, "\n")
     }
 
-    fn render_section(self, _ out: mut ByteBuffer, _ kind: u64) {
+    fn render_section(self, _ out: mut MemBuffer, _ kind: u64) {
         let sorted = self.sorted_entries(kind)
         if sorted.rows() > 0 {
             push_hashes(mut out, self.header_level + 1)
@@ -741,10 +733,9 @@ impl News {
             }
             push_lit(mut out, "\n")
         }
-        sorted.release()
     }
 
-    fn render_entry(self, _ out: mut ByteBuffer, _ entry: u64) {
+    fn render_entry(self, _ out: mut MemBuffer, _ entry: u64) {
         let text = self.entry_text(entry)
         let issues = self.entry_issues(entry)
         let has_issues = issues.rows() > 0
@@ -773,17 +764,16 @@ impl News {
             }
             push_lit(mut out, "\n")
         }
-        issues.release()
     }
 
     /// Append the changelog with the release notes inserted behind the start
     /// string, like `towncrier build` writes it. `out` must be empty.
-    pub fn render_changelog(self, _ out: mut ByteBuffer, version: Span, date: Span) -> Status {
+    pub fn render_changelog(self, _ out: mut MemBuffer, version: Span, date: Span) -> Status {
         let previous = self.previous_notes()
         // A formatted title that already occurs means the release exists.
         if self.title_mode == TITLE_FORMAT {
             self.push_title(mut out, version, date)
-            let title = Span { start: 0, len: out.len() }
+            let title = Span { start: 0, len: out.size() }
             let released = find_in(self.data, previous, out, title) < previous.len
             out.clear()
             if released {
@@ -797,17 +787,17 @@ impl News {
             push_span(mut out, self.data, self.start_string)
             push_lit(mut out, "\n")
         }
-        let notes_start = out.len()
+        let notes_start = out.size()
         self.render(mut out, version, date)
         if previous.len > 0 {
             push_span(mut out, self.data, previous)
         } else {
             // Without earlier notes the file ends right after the new ones.
-            var end = out.len()
+            var end = out.size()
             while end > notes_start && ingot::buf::is_space(out.byte_at(end - 1)) {
                 end -= 1
             }
-            core::assert(out.try_resize(end))
+            out.truncate(end.downcast_unchecked())
             push_lit(mut out, "\n")
         }
         Status::Ok
@@ -836,7 +826,7 @@ impl News {
     }
 }
 
-fn push_hashes(_ out: mut ByteBuffer, _ count: u64) {
+fn push_hashes(_ out: mut MemBuffer, _ count: u64) {
     var i: u64 = 0
     while i < count {
         push(mut out, 35)
@@ -845,7 +835,7 @@ fn push_hashes(_ out: mut ByteBuffer, _ count: u64) {
 }
 
 /// Drop leading zeros of a numeric issue, keeping a single `0`.
-fn normalize_issue(_ buf: ByteBuffer, _ issue: Span) -> Span {
+fn normalize_issue(_ buf: MemBuffer, _ issue: Span) -> Span {
     if !all_digits(buf, issue) {
         return issue
     }
@@ -856,7 +846,7 @@ fn normalize_issue(_ buf: ByteBuffer, _ issue: Span) -> Span {
     Span { start, len: issue.end() - start }
 }
 
-fn parse_counter(_ buf: ByteBuffer, _ digits: Span) -> u64 {
+fn parse_counter(_ buf: MemBuffer, _ digits: Span) -> u64 {
     var value: u64 = 0
     var i: u64 = 0
     while i < digits.len {
@@ -872,7 +862,7 @@ fn parse_counter(_ buf: ByteBuffer, _ digits: Span) -> u64 {
 }
 
 /// The first run of ASCII digits in `span`, or an empty span at its end.
-fn first_digit_run(_ buf: ByteBuffer, _ span: Span) -> Span {
+fn first_digit_run(_ buf: MemBuffer, _ span: Span) -> Span {
     var start = span.start
     while start < span.end() && !is_digit(buf.byte_at(start)) {
         start += 1
@@ -896,7 +886,7 @@ fn issue_class(_ issue: Span, _ digits: Span) -> u64 {
 }
 
 /// Compare `x` without `x_cut` to `y` without `y_cut`.
-fn compare_without(_ buf: ByteBuffer, _ x: Span, _ x_cut: Span, _ y: Span, _ y_cut: Span) -> i32 {
+fn compare_without(_ buf: MemBuffer, _ x: Span, _ x_cut: Span, _ y: Span, _ y_cut: Span) -> i32 {
     let x_len = x.len - x_cut.len
     let y_len = y.len - y_cut.len
     var i: u64 = 0
@@ -911,13 +901,13 @@ fn compare_without(_ buf: ByteBuffer, _ x: Span, _ x_cut: Span, _ y: Span, _ y_c
     compare_u64(x_len, y_len)
 }
 
-fn byte_without(_ buf: ByteBuffer, _ span: Span, _ cut: Span, _ index: u64) -> u8 {
+fn byte_without(_ buf: MemBuffer, _ span: Span, _ cut: Span, _ index: u64) -> u8 {
     let at = span.start + index
     if at < cut.start { buf.byte_at(at) } else { buf.byte_at(at + cut.len) }
 }
 
 /// Compare two decimal numbers of any length. Empty runs are smaller than any number.
-fn compare_numbers(_ buf: ByteBuffer, _ x: Span, _ y: Span) -> i32 {
+fn compare_numbers(_ buf: MemBuffer, _ x: Span, _ y: Span) -> i32 {
     if x.len == 0 || y.len == 0 {
         return compare_u64(x.len, y.len)
     }
@@ -930,7 +920,7 @@ fn compare_numbers(_ buf: ByteBuffer, _ x: Span, _ y: Span) -> i32 {
     compare_spans(buf, a, b)
 }
 
-fn skip_zeros(_ buf: ByteBuffer, _ digits: Span) -> Span {
+fn skip_zeros(_ buf: MemBuffer, _ digits: Span) -> Span {
     var start = digits.start
     while start < digits.end() && buf.byte_at(start) == 48 {
         start += 1
@@ -940,7 +930,7 @@ fn skip_zeros(_ buf: ByteBuffer, _ digits: Span) -> Span {
 
 /// Whether the text contains a nested markdown list, which moves the issue
 /// links onto their own line.
-fn has_sublist(_ buf: ByteBuffer, _ text: Span) -> bool {
+fn has_sublist(_ buf: MemBuffer, _ text: Span) -> bool {
     var i: u64 = 0
     while i + 5 <= text.len {
         let at = text.start + i
@@ -953,4 +943,12 @@ fn has_sublist(_ buf: ByteBuffer, _ text: Span) -> bool {
         i += 1
     }
     false
+}
+
+/// The next byte of stdin, or -1 at its end.
+fn read_char(_ reader: mut StdinReader) -> i32 uses (input: mut Stdin) {
+    match reader.read_byte() {
+        Option::Some(byte) => byte as i32
+        Option::None => -1
+    }
 }

@@ -1,4 +1,4 @@
-use std::native::ByteBuffer
+use core::MemBuffer
 
 /// A byte range inside a buffer.
 pub struct Span {
@@ -14,17 +14,36 @@ impl Span {
     }
 }
 
+/// Byte access by `u64` offsets, the unit of spans and table cells.
+pub trait Bytes {
+    fn size(self) -> u64
+    fn byte_at(self, _ index: u64) -> u8
+    fn set_byte(mut self, index: u64, value: u8)
+}
+
+impl Bytes for MemBuffer {
+    fn size(self) -> u64 {
+        self.len().downcast_unchecked()
+    }
+
+    fn byte_at(self, _ index: u64) -> u8 {
+        self[index.downcast_unchecked()]
+    }
+
+    fn set_byte(mut self, index: u64, value: u8) {
+        self[index.downcast_unchecked()] = value
+    }
+}
+
 /// Append one byte. Running out of host memory is fatal.
-pub fn push(_ buf: mut ByteBuffer, _ byte: u8) {
-    let len = buf.len()
-    core::assert(buf.try_resize(len + 1))
-    buf.set_byte(index: len, value: byte)
+pub fn push(_ buf: mut MemBuffer, _ byte: u8) {
+    buf.push(byte)
 }
 
 /// String literals, as in `push_lit(mut buf, "text")`.
 pub use lutz::Key as Literal
 
-pub fn push_lit<T: Literal>(_ buf: mut ByteBuffer, _ text: T) {
+pub fn push_lit<T: Literal>(_ buf: mut MemBuffer, _ text: T) {
     let bytes = text.bytes()
     var i: usize = 0
     while i < T::SIZE {
@@ -34,7 +53,7 @@ pub fn push_lit<T: Literal>(_ buf: mut ByteBuffer, _ text: T) {
 }
 
 /// Append `span` of `source` to `buf`.
-pub fn push_span(_ buf: mut ByteBuffer, _ source: ByteBuffer, _ span: Span) {
+pub fn push_span(_ buf: mut MemBuffer, _ source: MemBuffer, _ span: Span) {
     var i: u64 = 0
     while i < span.len {
         push(mut buf, source.byte_at(span.start + i))
@@ -43,7 +62,7 @@ pub fn push_span(_ buf: mut ByteBuffer, _ source: ByteBuffer, _ span: Span) {
 }
 
 /// Append `span` of `buf` to its own end.
-pub fn push_own_span(_ buf: mut ByteBuffer, _ span: Span) {
+pub fn push_own_span(_ buf: mut MemBuffer, _ span: Span) {
     var i: u64 = 0
     while i < span.len {
         let byte = buf.byte_at(span.start + i)
@@ -52,7 +71,7 @@ pub fn push_own_span(_ buf: mut ByteBuffer, _ span: Span) {
     }
 }
 
-pub fn span_eq_lit<T: Literal>(_ buf: ByteBuffer, _ span: Span, _ text: T) -> bool {
+pub fn span_eq_lit<T: Literal>(_ buf: MemBuffer, _ span: Span, _ text: T) -> bool {
     let bytes = text.bytes()
     if span.len as usize != T::SIZE {
         return false
@@ -68,7 +87,7 @@ pub fn span_eq_lit<T: Literal>(_ buf: ByteBuffer, _ span: Span, _ text: T) -> bo
 }
 
 /// Like `span_eq_lit`, but compares ASCII letters case-insensitively.
-pub fn span_eq_lit_lower<T: Literal>(_ buf: ByteBuffer, _ span: Span, _ text: T) -> bool {
+pub fn span_eq_lit_lower<T: Literal>(_ buf: MemBuffer, _ span: Span, _ text: T) -> bool {
     let bytes = text.bytes()
     if span.len as usize != T::SIZE {
         return false
@@ -83,17 +102,17 @@ pub fn span_eq_lit_lower<T: Literal>(_ buf: ByteBuffer, _ span: Span, _ text: T)
     true
 }
 
-pub fn spans_eq(_ buf: ByteBuffer, _ a: Span, _ b: Span) -> bool {
+pub fn spans_eq(_ buf: MemBuffer, _ a: Span, _ b: Span) -> bool {
     compare_spans(buf, a, b) == 0
 }
 
 /// Byte-wise ordering, which matches code point ordering for UTF-8 text.
-pub fn compare_spans(_ buf: ByteBuffer, _ a: Span, _ b: Span) -> i32 {
+pub fn compare_spans(_ buf: MemBuffer, _ a: Span, _ b: Span) -> i32 {
     compare_between(buf, a, buf, b)
 }
 
 /// `compare_spans` for spans of different buffers.
-pub fn compare_between(_ a_buf: ByteBuffer, _ a: Span, _ b_buf: ByteBuffer, _ b: Span) -> i32 {
+pub fn compare_between(_ a_buf: MemBuffer, _ a: Span, _ b_buf: MemBuffer, _ b: Span) -> i32 {
     var i: u64 = 0
     while i < a.len && i < b.len {
         let x = a_buf.byte_at(a.start + i)
@@ -121,7 +140,7 @@ pub fn compare_u64(_ a: u64, _ b: u64) -> i32 {
 
 /// Offset of the first occurrence of `needle` (of `needle_buf`) in
 /// `haystack` (of `buf`), or `haystack.len`.
-pub fn find_in(_ buf: ByteBuffer, _ haystack: Span, _ needle_buf: ByteBuffer, _ needle: Span) -> u64 {
+pub fn find_in(_ buf: MemBuffer, _ haystack: Span, _ needle_buf: MemBuffer, _ needle: Span) -> u64 {
     if needle.len > haystack.len {
         return haystack.len
     }
@@ -149,7 +168,7 @@ pub fn is_space(_ byte: u8) -> bool {
     byte == 32 || (byte >= 9 && byte <= 13) || (byte >= 28 && byte <= 31)
 }
 
-pub fn all_digits(_ buf: ByteBuffer, _ span: Span) -> bool {
+pub fn all_digits(_ buf: MemBuffer, _ span: Span) -> bool {
     if span.len == 0 {
         return false
     }
@@ -163,11 +182,11 @@ pub fn all_digits(_ buf: ByteBuffer, _ span: Span) -> bool {
     true
 }
 
-pub fn strip(_ buf: ByteBuffer, _ span: Span) -> Span {
+pub fn strip(_ buf: MemBuffer, _ span: Span) -> Span {
     rstrip(buf, lstrip(buf, span))
 }
 
-pub fn lstrip(_ buf: ByteBuffer, _ span: Span) -> Span {
+pub fn lstrip(_ buf: MemBuffer, _ span: Span) -> Span {
     var start = span.start
     while start < span.end() && is_space(buf.byte_at(start)) {
         start += 1
@@ -175,7 +194,7 @@ pub fn lstrip(_ buf: ByteBuffer, _ span: Span) -> Span {
     Span { start, len: span.end() - start }
 }
 
-pub fn rstrip(_ buf: ByteBuffer, _ span: Span) -> Span {
+pub fn rstrip(_ buf: MemBuffer, _ span: Span) -> Span {
     var end = span.end()
     while end > span.start && is_space(buf.byte_at(end - 1)) {
         end -= 1
@@ -185,23 +204,23 @@ pub fn rstrip(_ buf: ByteBuffer, _ span: Span) -> Span {
 
 /// A growable table of `u64` cells with a fixed number of columns.
 pub struct Table {
-    cells: ByteBuffer,
+    cells: MemBuffer,
     columns: u64,
 }
 
 impl Table {
     pub fn new(_ columns: u64) -> Self {
-        Self { cells: ByteBuffer::new(), columns }
+        Self { cells: MemBuffer::empty(), columns }
     }
 
     pub fn rows(self) -> u64 {
-        self.cells.len() / (self.columns * 8)
+        self.cells.size() / (self.columns * 8)
     }
 
     /// Append a zeroed row and return its index.
     pub fn add_row(mut self) -> u64 {
         let row = self.rows()
-        core::assert(self.cells.try_resize((row + 1) * self.columns * 8))
+        core::assert(self.cells.try_resize(((row + 1) * self.columns * 8).downcast_unchecked()))
         row
     }
 
@@ -231,9 +250,5 @@ impl Table {
     pub fn push(mut self, _ value: u64) {
         let row = self.add_row()
         self.set(row, 0, value)
-    }
-
-    pub fn release(own self) {
-        self.cells.release()
     }
 }
