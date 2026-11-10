@@ -73,12 +73,13 @@ pub fn push_own_span(_ buf: mut MemBuffer, _ span: Span) {
 
 pub fn span_eq_lit<T: Literal>(_ buf: MemBuffer, _ span: Span, _ text: T) -> bool {
     let bytes = text.bytes()
-    if span.len as usize != T::SIZE {
+    let len: usize = span.len.downcast_unchecked()
+    if len != T::SIZE {
         return false
     }
     var i: u64 = 0
     while i < span.len {
-        if buf.byte_at(span.start + i) != bytes[i as usize] {
+        if buf.byte_at(span.start + i) != bytes[i.downcast_unchecked()] {
             return false
         }
         i += 1
@@ -89,12 +90,13 @@ pub fn span_eq_lit<T: Literal>(_ buf: MemBuffer, _ span: Span, _ text: T) -> boo
 /// Like `span_eq_lit`, but compares ASCII letters case-insensitively.
 pub fn span_eq_lit_lower<T: Literal>(_ buf: MemBuffer, _ span: Span, _ text: T) -> bool {
     let bytes = text.bytes()
-    if span.len as usize != T::SIZE {
+    let len: usize = span.len.downcast_unchecked()
+    if len != T::SIZE {
         return false
     }
     var i: u64 = 0
     while i < span.len {
-        if to_lower(buf.byte_at(span.start + i)) != bytes[i as usize] {
+        if to_lower(buf.byte_at(span.start + i)) != bytes[i.downcast_unchecked()] {
             return false
         }
         i += 1
